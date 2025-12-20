@@ -8,6 +8,21 @@
 - **Strategy**: Spot Long-Only (No Leverage, No Shorting)
 - **Risk Profile**: Go-to-Cash during crashes.
 
+## 📈 Comprehensive Backtest Results
+![Backtest Chart](docs/backtest_results.png)
+
+The performance above is verified using a **Walk-Forward Validation** protocol. This ensures the model is never tested on data it has seen during training.
+
+### Methodology
+1.  **Rolling Windows**: We train on Year $N$ (e.g., 2019) and test on Year $N+1$ (e.g., 2020).
+2.  **Re-Optimization**: The model is re-trained annually to adapt to new market regimes (e.g., Bull Market 2021 vs Bear Market 2022).
+3.  **Transaction Costs**: All simulations include a 0.1% fee per trade to mimic real-world Binance conditions.
+
+### Why This Matters
+Most crypto bots overfit to a specific bull run (like 2021) and fail miserably when the market turns. Our **Metamodel** (LSTM + XGBoost) dynamically adjusts its aggression.
+-   **In Bull Runs**: It captures the trend (High Beta).
+-   **In Bear Markets**: It detects volatility and sits in USDT (Cash Preservation).
+
 ---
 
 ## 🧠 The Brain (AI Strategy)
