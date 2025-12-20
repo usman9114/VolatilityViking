@@ -1,0 +1,24 @@
+
+# Exclude git
+.git/
+.gitignore
+
+# Exclude python/env artifacts
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Exclude data/outputs (except structure if needed, but we copy selectively)
+data/processed/
+data/temp/
+mlruns/
+models/*.pth
+bot.log
+*.png
+*.html
+
+# CRITICAL: Exclude heavy build artifacts to prevent context bloat
+*.tar
+eth_bot_image.tar

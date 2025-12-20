@@ -1,0 +1,24 @@
+# Ignored Files
+.env
+.venv
+venv
+__pycache__
+*.pyc
+*.tar.gz
+*.zip
+*.log
+
+# Project specific
+data/
+logs/
+logs-test/
+mlruns/
+models/
+data-test/
+passivbot_repo/
+.gemini/
+.vscode/
+
+# Keep specific guide if needed, but ignore large docker tars
+eth-bot-docker.tar.gz
+eth-bot_v0.0.1.zip

@@ -1,0 +1,19 @@
+ccxt
+pandas
+# pandas-ta removed (unused)
+numpy<2.0.0
+scikit-learn
+torch
+
+sentence-transformers
+cryptocompare
+requests
+yfinance
+matplotlib
+web3
+python-dotenv
+streamlit
+plotly
+schedule
+numba
+mlflow
