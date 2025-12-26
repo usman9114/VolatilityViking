@@ -60,12 +60,13 @@ def main():
     parser.add_argument('--symbol', type=str, default='ETH/USDT', help='Trading Pair')
     parser.add_argument('--timeframe', type=str, default='4h', help='Timeframe')
     parser.add_argument('--aggressive', action='store_true', help='Enable aggressive mode (5s checks, proactive grid). Default is conservative (60s checks, reactive grid).')
-    parser.add_argument('--dashboard', action='store_true', help='Launch Streamlit dashboard (alternative to --mode dashboard)')
+    parser.add_argument('--config', type=str, default='config.json', help='Path to strategy config file (required for live mode)')
+    parser.add_argument('--async-mode', action='store_true', dest='async_mode', help='Use async runner (Passivbot style - faster)')
     
     args = parser.parse_args()
     
     # Handle dashboard mode
-    if args.dashboard or (hasattr(args, 'mode') and args.mode == 'dashboard'):
+    if hasattr(args, 'mode') and args.mode == 'dashboard':
         print("🚀 Launching Streamlit Dashboard...")
         import subprocess
         subprocess.run(['streamlit', 'run', 'dashboard.py'])
@@ -82,18 +83,17 @@ def main():
         }
         run_pipeline(config)
     elif args.mode == 'live':
-        print(f"Starting Live Trader for {args.symbol} {args.timeframe}...")
-        # from src.live.trader import start_trader # DEPRECATED: Uses old trader
-        # start_trader(args.symbol, args.timeframe)
+        print("=" * 60)
+        print("🚀 VOLATILITY VIKING - ASYNC LIVE TRADER")
+        print("=" * 60)
+        print(f"Config: {args.config}")
+        print("Architecture: Passivbot-style async (all symbols parallel)")
+        print("=" * 60)
         
-        # USE AUDITED BINANCE BOT
-        from src.live.binance_bot import BinanceBot
-        # Default amounts or add args to main.py? For now use defaults or hardcode safe test amount
-        aggressive = getattr(args, 'aggressive', False)  # Get aggressive flag if exists
-        bot = BinanceBot(symbol=args.symbol, capital_limit=1000, live_mode=True, aggressive_mode=aggressive) 
-        # Note: 'live_mode=True' means MAINNET in binance_bot.py. 
-        # We might want to pass this as an arg.
-        bot.run()
+        import asyncio
+        from src.live.async_runner import main_async
+        
+        asyncio.run(main_async(args.config))
 
 if __name__ == "__main__":
     main()

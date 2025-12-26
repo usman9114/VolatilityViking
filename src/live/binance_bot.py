@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import sys
 import logging
 from datetime import datetime
+import json
 
 # Add project root to path
 sys.path.append(os.getcwd())
@@ -65,12 +66,31 @@ logger.info(f"Bot started - Log file: {log_filename}")
 logger.info(f"="*60)
 
 class BinanceBot:
-    def __init__(self, symbol='ETH/USDT', capital_limit=1000, live_mode=False, aggressive_mode=False):
+    def __init__(self, config_path='config.json', symbol_override=None):
         load_dotenv()
-        self.live_mode = live_mode
-        self.aggressive_mode = aggressive_mode  # Feature flag for Passivbot-style aggressive grid management
-        self.symbol = symbol
-        self.capital_limit = capital_limit
+        self.config = self.load_config(config_path)
+        
+        # Use override if provided, else fall back to config
+        if symbol_override:
+            self.symbol = symbol_override
+        else:
+            # Support both 'symbol' (string) and 'symbols' (list, take first)
+            symbols = self.config.get('symbols', [])
+            if symbols:
+                self.symbol = symbols[0]
+            else:
+                self.symbol = self.config.get('symbol', 'ETH/USDT')
+        
+        try:
+            self.base_asset = self.symbol.split('/')[0]
+            self.quote_asset = self.symbol.split('/')[1]
+        except:
+            self.base_asset = "ETH"
+            self.quote_asset = "USDT"
+            
+        self.capital_limit = self.config.get('capital_limit', 1000)
+        self.live_mode = self.config.get('live_mode', False)
+        self.aggressive_mode = self.config.get('aggressive_mode', False)
         
         # Log mode
         if self.aggressive_mode:
@@ -85,18 +105,25 @@ class BinanceBot:
             print(f"{Colors.GREEN}   - Proven approach{Colors.RESET}\n")
         
         # Wallet Exposure Limits (Passivbot Risk Management)
-        self.wallet_exposure_limit = 1.0  # Max 100% of balance per position
-        self.total_wallet_exposure_limit = 1.5  # Max 150% total (allows leverage)
+        self.wallet_exposure_limit = self.config.get('wallet_exposure_limit', 1.0)
+        self.total_wallet_exposure_limit = self.config.get('total_wallet_exposure_limit', 1.5)
         self.current_wallet_exposure = 0.0  # Tracked dynamically
         self.peak_balance = 0.0  # Track historical peak for unstucking
         
-        # Auto-Unstuck Parameters
-        self.unstuck_threshold = 0.80  # Trigger when WE > 80% of limit
-        self.unstuck_close_pct = 0.10  # Close 10% of position each time
-        self.unstuck_loss_allowance_pct = 0.02  # Allow 2% loss below peak
-        self.unstuck_price_distance_threshold = 0.20  # Trigger when price is 20% away from avg entry
+        # Grid Settings
+        self.grid_settings = self.config.get('grid_settings', {})
+        self.grid_span = self.grid_settings.get('grid_span', 0.30) # 30% range
+        self.qty_step_multiplier = self.grid_settings.get('qty_step_multiplier', 1.4)
+        self.max_orders = self.grid_settings.get('max_orders', 10)
         
-        # Dynamic Grid Spacing Parameters
+        # Auto-Unstuck Parameters
+        unstuck = self.config.get('unstuck_settings', {})
+        self.unstuck_threshold = unstuck.get('unstuck_threshold', 0.80)
+        self.unstuck_close_pct = unstuck.get('unstuck_close_pct', 0.10)
+        self.unstuck_loss_allowance_pct = unstuck.get('unstuck_loss_allowance_pct', 0.02)
+        self.unstuck_price_distance_threshold = unstuck.get('unstuck_price_distance_threshold', 0.20)
+        
+        # Dynamic Grid Spacing Parameters (Legacy support until full Geometric takeover)
         self.grid_spacing_base = 0.01  # 1% base spacing
         self.grid_spacing_we_weight = 0.5  # Widen by 50% per WE unit
         self.grid_spacing_volatility_weight = 2.0  # Widen by 200% per volatility unit
@@ -104,9 +131,10 @@ class BinanceBot:
         self.volatility_ema = 0.02  # Initialize with 2% volatility estimate
         
         # Trailing Close Parameters (Passivbot)
-        self.close_trailing_threshold_pct = 0.02  # Wait for 2% profit
-        self.close_trailing_retracement_pct = 0.005  # Close on 0.5% pullback
-        self.close_trailing_qty_pct = 0.20  # Close 20% per trigger
+        trailing = self.config.get('trailing_settings', {})
+        self.close_trailing_threshold_pct = trailing.get('close_trailing_threshold_pct', 0.02)
+        self.close_trailing_retracement_pct = trailing.get('close_trailing_retracement_pct', 0.005)
+        self.close_trailing_qty_pct = trailing.get('close_trailing_qty_pct', 0.20)
         self.highest_price_since_entry = None  # Track for trailing
         
         # Close Grid Markup Parameters (Passivbot)
@@ -116,8 +144,8 @@ class BinanceBot:
         self.close_grid_lines = 5  # Number of TP orders
         
         # Trailing Entry Parameters (Passivbot)
-        self.entry_trailing_threshold_pct = 0.01  # Wait for 1% move
-        self.entry_trailing_retracement_pct = 0.003  # Enter on 0.3% pullback
+        self.entry_trailing_threshold_pct = trailing.get('entry_trailing_threshold_pct', 0.01)
+        self.entry_trailing_retracement_pct = trailing.get('entry_trailing_retracement_pct', 0.003)
         self.lowest_price_since_signal = None  # Track for trailing entries
         
         # Select Keys based on Mode
@@ -140,6 +168,138 @@ class BinanceBot:
         if not os.path.exists(self.log_file):
             with open(self.log_file, 'w') as f:
                 f.write("timestamp,signal,action,price,quantity,order_id,type,status,info,usdt_bal,eth_bal,total_equity_usdt,wallet_exposure\n")
+        
+        # SAFETY: Global Kill-Switch
+        self.high_water_mark_equity = 0.0
+        self.MAX_DRAWDOWN_PCT = 0.20  # 20% Max Drawdown allowed
+        
+        # SAFETY: Auto-Unstuck Tracker
+        self.position_age_start = None
+        self.unstuck_threshold_hours = 24
+    
+    def load_config(self, path):
+        try:
+            with open(path, 'r') as f:
+                content = f.read()
+                
+            # Strip comments (// or #)
+            import re
+            # Remove // and # comments, but keep lines intact
+            content = re.sub(r'#.*', '', content)
+            content = re.sub(r'//.*', '', content)
+            
+            return json.loads(content)
+        except Exception as e:
+            print(f"Error loading config: {e}. Using defaults.")
+            return {}
+
+    def hot_reload_config(self):
+        """
+        Hot-reload config from file (Passivbot style).
+        Updates forager symbols without restart.
+        Called periodically from main loop.
+        """
+        try:
+            new_config = self.load_config(self.config_path)
+            
+            # Track what changed
+            old_forager = self.config.get('forager', {})
+            new_forager = new_config.get('forager', {})
+            
+            old_symbols = set(old_forager.get('approved_symbols', []))
+            new_symbols = set(new_forager.get('approved_symbols', []))
+            
+            # Check if forager symbols changed
+            if old_symbols != new_symbols:
+                added = new_symbols - old_symbols
+                removed = old_symbols - new_symbols
+                
+                if added:
+                    print(f"[Hot-Reload] New symbols added: {added}")
+                if removed:
+                    print(f"[Hot-Reload] Symbols removed: {removed}")
+                
+                # Update config
+                self.config = new_config
+                print(f"[Hot-Reload] Config reloaded. Active forager symbols: {len(new_symbols)}")
+                return True
+            
+            # Check if other important settings changed
+            if new_forager.get('max_positions') != old_forager.get('max_positions'):
+                self.config = new_config
+                print(f"[Hot-Reload] max_positions changed to {new_forager.get('max_positions')}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"[Hot-Reload] Error: {e}")
+            return False
+
+    def calc_geometric_grid(self, center_price, n_orders, spacing_weight=1.2, grid_span=0.30):
+        """
+        Calculate geometric grid prices.
+        Spacing increases geometrically to cover grid_span with n_orders.
+        
+        r = grid_span (e.g. 0.3 for 30%)
+        d0 = initial_spacing (small)
+        alpha = spacing_weight (e.g. 1.2)
+        
+        We want sum(d0 * alpha^i for i in 0..n-1) = r
+        d0 * (alpha^n - 1) / (alpha - 1) = r
+        d0 = r * (alpha - 1) / (alpha^n - 1)
+        """
+        try:
+            if n_orders < 1: return []
+            
+            # Solve for initial spacing d0
+            if spacing_weight == 1.0:
+                d0 = grid_span / n_orders
+            else:
+                d0 = grid_span * (spacing_weight - 1) / (pow(spacing_weight, n_orders) - 1)
+            
+            prices = []
+            cum_dist = 0
+            for i in range(n_orders):
+                dist = d0 * pow(spacing_weight, i)
+                cum_dist += dist
+                
+                # Buy side
+                prices.append(center_price * (1 - cum_dist))
+            
+            return prices
+        except Exception as e:
+            print(f"Geometric Grid Error: {e}")
+            return []
+
+    def calc_martingale_qty(self, total_equity, n_orders, multiplier=1.4):
+        """
+        Calculate quantities for martingale sizing.
+        Total allocation = Wallet Exposure Limit * Total Equity
+        
+        q0 * (mult^n - 1) / (mult - 1) = Total_Allocation
+        q0 = Total_Allocation * (mult - 1) / (mult^n - 1)
+        """
+        try:
+            total_allocation = total_equity * self.wallet_exposure_limit
+            
+            if n_orders < 1: return []
+            
+            if multiplier == 1.0:
+                q0 = total_allocation / n_orders
+            else:
+                q0 = total_allocation * (multiplier - 1) / (pow(multiplier, n_orders) - 1)
+            
+            qtys = []
+            for i in range(n_orders):
+                q = q0 * pow(multiplier, i)
+                qtys.append(q)
+                
+            return qtys
+        except Exception as e:
+             print(f"Martingale Qty Error: {e}")
+             return []
+
         
         if not self.api_key or not self.secret_key:
             missing_key = []
@@ -216,6 +376,25 @@ class BinanceBot:
             price = ticker['last']
             
             total_equity = total_usdt + (total_eth * price)
+        
+            # SAFETY: Update High Water Mark & Check Drawdown
+            if total_equity > self.high_water_mark_equity:
+                self.high_water_mark_equity = total_equity
+            
+            drawdown = (self.high_water_mark_equity - total_equity) / self.high_water_mark_equity if self.high_water_mark_equity > 0 else 0
+            
+            if drawdown > self.MAX_DRAWDOWN_PCT:
+                msg = f"CRITICAL: Max Drawdown Hit! ({drawdown:.2%} > {self.MAX_DRAWDOWN_PCT:.2%}). Stopping Bot."
+                logging.critical(msg)
+                print(f"\n{'!'*50}\n{msg}\n{'!'*50}\n")
+                try:
+                    print("Attempting to cancel all orders...")
+                    self.exchange.cancel_all_orders(self.symbol)
+                except:
+                    pass
+                import sys
+                sys.exit(1)
+
             return total_usdt, total_eth, total_equity
         except Exception as e:
             print(f"Error fetching equity: {e}")
@@ -631,6 +810,70 @@ class BinanceBot:
         except Exception as e:
             print(f"[Close Grid] Error: {e}")
 
+    def auto_unstuck(self):
+        """
+        PASSIVBOT-STYLE AUTO-UNSTUCK
+        Checks if position has been held too long and tries to exit at Break-Even or small loss
+        to recycle capital.
+        """
+        try:
+            total_usdt, total_eth, total_equity = self.fetch_equity()
+            
+            # 1. Track Position Age
+            if total_eth > 0.001:
+                if self.position_age_start is None:
+                    self.position_age_start = time.time()
+                    print(f"[Unstuck] New Position Detected. Timer Started.")
+            else:
+                if self.position_age_start is not None:
+                    self.position_age_start = None
+                    print(f"[Unstuck] Position Closed. Timer Reset.")
+                return # No position to unstuck
+
+            # 2. Check Duration
+            if self.position_age_start is None: return
+            
+            elapsed_hours = (time.time() - self.position_age_start) / 3600
+            if elapsed_hours < self.unstuck_threshold_hours:
+                return # Not stuck yet
+                
+            # 3. Analyze "Stuck" Position
+            current_price = self.get_market_price()
+            avg_entry = total_equity / total_eth if total_eth > 0 else 0
+            
+            if avg_entry == 0: return
+
+            pnl_pct = (current_price / avg_entry) - 1
+            
+            print(f"\n[Unstuck Check] Position held for {elapsed_hours:.1f} hours.")
+            print(f"  Avg Entry: ${avg_entry:.2f} | Current: ${current_price:.2f} | PnL: {pnl_pct*100:.2f}%")
+            
+            # 4. Action Logic
+            # Condition A: We are in profit (even small), just close it to free liquidity
+            if pnl_pct > 0.002: # 0.2% profit
+                print("  Condition met: Minimal Profit. Closing to recycle.")
+                self.close_position_market()
+                self.position_age_start = None
+                
+            # Condition B: We are at small loss but stuck long time (Recycle)
+            elif pnl_pct > -0.02 and elapsed_hours > 48:
+                print("  Condition met: Small Loss (-2%) after 48h. Closing to recycle.")
+                self.close_position_market()
+                self.position_age_start = None
+                
+            # Condition C: Deep loss? Maybe Hedge or just wait (User preference)
+            # For now, we only handle small loss recycling.
+            
+        except Exception as e:
+            print(f"[Unstuck] Error: {e}")
+
+    def close_position_market(self):
+        balance = self.exchange.fetch_balance()
+        eth_free = balance['free'].get('ETH', 0)
+        if eth_free > 0.001:
+            print(f"Executing Market Sell for {eth_free:.4f} ETH...")
+            self.exchange.create_market_order(self.symbol, 'sell', eth_free)
+
     def log_trade(self, signal, action, price, quantity, order_id, order_type, status, info=""):
         timestamp = pd.Timestamp.now()
         
@@ -784,63 +1027,76 @@ class BinanceBot:
 
     def calculate_ideal_grid(self, center_price):
         """
-        Calculate the ideal grid state based on current conditions.
+        Calculate the ideal grid state based on Geometric Progression & Martingale.
         
         Returns:
             (ideal_buys, ideal_sells): Lists of dicts with 'price' and 'quantity'
         """
-        # Fetch current balance
+        # Fetch current side
         balance = self.exchange.fetch_balance()
-        usdt_free = balance['free'].get('USDT', 0)
-        eth_free = balance['free'].get('ETH', 0)
+        quote_free = balance['free'].get(self.quote_asset, 0)
+        base_free = balance['free'].get(self.base_asset, 0)
+        total_quote, total_base, total_equity = self.fetch_equity()
         
-        # Calculate dynamic spacing
-        self.update_volatility_ema()
-        spacing_pct = self.calculate_grid_spacing()
-        
-        up_range = center_price * (1 + spacing_pct)
-        down_range = center_price * (1 - spacing_pct)
+        # Grid Params
+        n_orders = self.max_orders
+        spacing_weight = self.grid_settings.get('grid_spacing_weight', 1.2)
+        grid_span = self.grid_span
         
         ideal_buys = []
         ideal_sells = []
         
-        # Calculate ideal buy orders
-        max_buy_lines = 5
-        buy_prices = pd.interval_range(start=down_range, end=center_price, periods=max_buy_lines).mid
+        # --- BUYS (Geometric Down) ---
+        buy_prices = self.calc_geometric_grid(center_price, n_orders, spacing_weight, grid_span)
         
-        if usdt_free > 20:
-            usdt_for_buys = usdt_free * 0.90
-            qty_per_buy = (usdt_for_buys / max_buy_lines) / center_price
-            qty_per_buy = float(self.exchange.amount_to_precision(self.symbol, qty_per_buy))
+        # Calculate Martingale Distribution (in Quote Currency)
+        buy_quote_values = self.calc_martingale_qty(total_equity, n_orders, self.qty_step_multiplier)
+        
+        if quote_free > 10: # Min buffer
+             remaining_quote = quote_free
+             for p, val_quote in zip(buy_prices, buy_quote_values):
+                 price = float(self.exchange.price_to_precision(self.symbol, p))
+                 
+                 # CONVERT VALUE TO BASE QTY
+                 raw_qty = val_quote / price
+                 qty = float(self.exchange.amount_to_precision(self.symbol, raw_qty))
+                 
+                 cost = qty * price
+                 
+                 # Limits check (Min notional usually 5-10 USDT)
+                 if remaining_quote >= cost and cost >= 5.0 and qty >= 0.00001:
+                     ideal_buys.append({'price': price, 'quantity': qty, 'side': 'buy'})
+                     remaining_quote -= cost
+
+        # --- SELLS (Geometric Up) ---
+        sell_prices = []
+        d0 = (grid_span * (spacing_weight - 1) / (pow(spacing_weight, n_orders) - 1)) if spacing_weight != 1 else grid_span/n_orders
+        cum_dist = 0
+        for i in range(n_orders):
+            dist = d0 * pow(spacing_weight, i)
+            cum_dist += dist
+            sell_prices.append(center_price * (1 + cum_dist))
             
-            remaining_usdt = usdt_free
-            for p in buy_prices:
-                price = float(self.exchange.price_to_precision(self.symbol, p))
-                cost = qty_per_buy * price
-                
-                # Ensure qty meets minimum precision (0.0001)
-                if remaining_usdt >= cost and cost >= 6.0 and qty_per_buy >= 0.0001:
-                    ideal_buys.append({'price': price, 'quantity': qty_per_buy, 'side': 'buy'})
-                    remaining_usdt -= cost
-        
-        # Calculate ideal sell orders
-        max_sell_lines = 5
-        sell_prices = pd.interval_range(start=center_price, end=up_range, periods=max_sell_lines).mid
-        
-        if eth_free > 0.001:
-            base_qty = eth_free * 0.05
-            multipliers = [1, 2, 4, 8, 5]
-            
-            total_eth_allocated = 0
-            for p, mult in zip(sell_prices, multipliers):
-                price = float(self.exchange.price_to_precision(self.symbol, p))
-                sell_qty = base_qty * mult
-                sell_qty = float(self.exchange.amount_to_precision(self.symbol, sell_qty))
-                value = sell_qty * price
-                
-                if (total_eth_allocated + sell_qty) <= eth_free and value >= 5.0 and sell_qty >= 0.0001:
-                    ideal_sells.append({'price': price, 'quantity': sell_qty, 'side': 'sell'})
-                    total_eth_allocated += sell_qty
+        # For sells, distribute the CURRENT AVAILABLE BASE ASSET using the same martingale curve
+        if base_free > 0.0001:
+             # Sell distribution logic
+             spacing_mult = self.qty_step_multiplier
+             if spacing_mult == 1:
+                 q0 = base_free / n_orders
+             else:
+                 q0 = base_free * (spacing_mult - 1) / (pow(spacing_mult, n_orders) - 1)
+             
+             total_base_allocated = 0
+             for i, p in enumerate(sell_prices):
+                 q_raw = q0 * pow(spacing_mult, i)
+                 
+                 price = float(self.exchange.price_to_precision(self.symbol, p))
+                 qty = float(self.exchange.amount_to_precision(self.symbol, q_raw))
+                 value = qty * price
+                 
+                 if (total_base_allocated + qty) <= base_free and value >= 5.0 and qty >= 0.00001:
+                    ideal_sells.append({'price': price, 'quantity': qty, 'side': 'sell'})
+                    total_base_allocated += qty
         
         return ideal_buys, ideal_sells
 
@@ -960,140 +1216,84 @@ class BinanceBot:
 
     def execute_grid(self, center_price):
         print(f"\n{'='*70}")
-        print(f"EXECUTING GRID CENTERED AT ${center_price:.2f}")
+        print(f"EXECUTING GEOMETRIC GRID CENTERED AT ${center_price:.2f}")
         print(f"{'='*70}")
         
-        # 1. Cancel Open Orders
-        open_orders = self.exchange.fetch_open_orders(self.symbol)
-        if open_orders:
-            print(f"[Grid] Cancelling {len(open_orders)} open orders...")
-            self.exchange.cancel_all_orders(self.symbol)
-            self.log_trade("GRID", "CANCEL_ALL", center_price, 0, "N/A", "CANCEL", "OK", "Resetting Grid")
-            
-        # 2. Fetch Fresh Balance (CRITICAL: Must reflect latest Binance state)
+        # 1. Fetch State
         total_usdt, total_eth, total_equity = self.fetch_equity()
-        balance = self.exchange.fetch_balance()
-        usdt_free = balance['free'].get('USDT', 0)
-        eth_free = balance['free'].get('ETH', 0)
-        
-        print(f"\n[Balance Check - Pre-Grid]")
-        print(f"  Total Equity: ${total_equity:.2f}")
-        print(f"  USDT: ${total_usdt:.2f} (Free: ${usdt_free:.2f})")
-        print(f"  ETH: {total_eth:.4f} (Free: {eth_free:.4f})")
-        print(f"  ETH Value: ${total_eth * center_price:.2f}")
-        
-        # DYNAMIC GRID SPACING (Passivbot Enhancement)
-        self.update_volatility_ema()
-        spacing_pct = self.calculate_grid_spacing()
-        
-        up_range = center_price * (1 + spacing_pct)
-        down_range = center_price * (1 - spacing_pct)
-        
-        print(f"\n[Grid Parameters]")
-        print(f"  Spacing: {spacing_pct:.2%} (Base: {self.grid_spacing_base:.2%}, Vol: {self.volatility_ema:.4f}, WE: {self.current_wallet_exposure:.2f})")
-        print(f"  Price Range: ${down_range:.2f} - ${up_range:.2f}")
-        
-        # 3. DYNAMIC BUY GRID (Based on Available USDT)
-        max_buy_lines = 5  # Target
-        buy_prices = pd.interval_range(start=down_range, end=center_price, periods=max_buy_lines).mid
-        
-        if usdt_free > 20:  # Minimum threshold
-            # Calculate how much USDT per buy order (use 90% of free USDT)
-            usdt_for_buys = usdt_free * 0.90
-            qty_per_buy = (usdt_for_buys / max_buy_lines) / center_price
-            qty_per_buy = float(self.exchange.amount_to_precision(self.symbol, qty_per_buy))
-            
-            print(f"\n[Buy Grid] Deploying {max_buy_lines} orders")
-            print(f"  USDT Available: ${usdt_free:.2f}")
-            print(f"  USDT Per Order: ${usdt_for_buys / max_buy_lines:.2f}")
-            print(f"  Qty Per Order: {qty_per_buy:.4f} ETH")
-            
-            buy_orders_placed = 0
-            remaining_usdt = usdt_free
-            
-            for idx, p in enumerate(buy_prices):
-                try:
-                    price = float(self.exchange.price_to_precision(self.symbol, p))
-                    cost = qty_per_buy * price
-                    
-                    # Validate balance before each order
-                    if remaining_usdt >= cost and cost >= 6.0:
-                        order = self.exchange.create_limit_buy_order(self.symbol, qty_per_buy, price)
-                        self.log_trade("GRID", "BUY_LIMIT", price, qty_per_buy, order['id'], "LIMIT", "OPEN")
-                        remaining_usdt -= cost
-                        buy_orders_placed += 1
-                        print(f"  ✓ Buy #{idx+1}: {qty_per_buy:.4f} ETH @ ${price:.2f} (Cost: ${cost:.2f})")
-                    else:
-                        if cost < 6.0:
-                            print(f"  ✗ Buy #{idx+1}: Skipped (value ${cost:.2f} too small)")
-                        else:
-                            print(f"  ✗ Buy #{idx+1}: Skipped (insufficient USDT: ${remaining_usdt:.2f} < ${cost:.2f})")
-                        
-                except Exception as e: 
-                    print(f"  ✗ Buy #{idx+1}: Failed - {e}")
-            
-            print(f"  Summary: {buy_orders_placed}/{max_buy_lines} buy orders placed")
-        else:
-            print(f"\n[Buy Grid] SKIPPED - Insufficient USDT (${usdt_free:.2f} < $20)")
+        open_orders = self.exchange.fetch_open_orders(self.symbol)
+        print(f"[Geometric Grid] Found {len(open_orders)} existing orders.")
 
-        # 4. DYNAMIC SELL GRID (Based on Available ETH)
-        max_sell_lines = 5  # Target
-        sell_prices = pd.interval_range(start=center_price, end=up_range, periods=max_sell_lines).mid
+        # 2. Generate IDEAL Orders (Using new Geometric Logic)
+        ideal_buys, ideal_sells = self.calculate_ideal_grid(center_price)
         
-        if eth_free > 0.001:  # Minimum threshold
-            # MARTINGALE GRID SIZING (Passivbot Strategy)
-            base_qty = eth_free * 0.05  # 5% base quantity
-            multipliers = [1, 2, 4, 8, 5]  # 5%, 10%, 20%, 40%, 25% (total: 100%)
-            
-            print(f"\n[Sell Grid] Deploying {max_sell_lines} orders (Martingale)")
-            print(f"  ETH Available: {eth_free:.4f}")
-            print(f"  Base Qty: {base_qty:.4f} (5% of free ETH)")
-            
-            sell_orders_placed = 0
-            total_eth_allocated = 0
-            
-            for idx, (p, mult) in enumerate(zip(sell_prices, multipliers)):
-                try:
-                    price = float(self.exchange.price_to_precision(self.symbol, p))
-                    sell_qty = base_qty * mult
-                    sell_qty = float(self.exchange.amount_to_precision(self.symbol, sell_qty))
-                    value = sell_qty * price
-                    
-                    # Validate balance before each order
-                    # Check if we have enough ETH remaining (accounting for already allocated)
-                    if (total_eth_allocated + sell_qty) <= eth_free and value >= 5.0:
-                        order = self.exchange.create_limit_sell_order(self.symbol, sell_qty, price)
-                        self.log_trade("GRID", "SELL_LIMIT", price, sell_qty, order['id'], "LIMIT", "OPEN")
-                        total_eth_allocated += sell_qty
-                        sell_orders_placed += 1
-                        pct_of_free = (sell_qty / eth_free) * 100
-                        print(f"  ✓ Sell #{idx+1}: {sell_qty:.4f} ETH @ ${price:.2f} ({pct_of_free:.0f}% of free, ${value:.2f})")
-                    else:
-                        if value < 5.0:
-                            print(f"  ✗ Sell #{idx+1}: Skipped (value ${value:.2f} too small)")
-                        else:
-                            remaining_eth = eth_free - total_eth_allocated
-                            print(f"  ✗ Sell #{idx+1}: Skipped (insufficient ETH: {remaining_eth:.4f} < {sell_qty:.4f})")
-                        
-                except Exception as e: 
-                    print(f"  ✗ Sell #{idx+1}: Failed - {e}")
-            
-            print(f"  Summary: {sell_orders_placed}/{max_sell_lines} sell orders placed")
-            print(f"  Total ETH Allocated: {total_eth_allocated:.4f}/{eth_free:.4f} ({(total_eth_allocated/eth_free)*100:.0f}%)")
-        else:
-            print(f"\n[Sell Grid] SKIPPED - Insufficient ETH ({eth_free:.4f} < 0.001)")
-            
-        # 5. Post-Grid Balance Check
-        post_usdt, post_eth, post_equity = self.fetch_equity()
-        post_balance = self.exchange.fetch_balance()
-        post_usdt_free = post_balance['free'].get('USDT', 0)
-        post_eth_free = post_balance['free'].get('ETH', 0)
+        # Transform to flat list of dicts consistent with previous structure
+        ideal_orders = []
+        for b in ideal_buys:
+             ideal_orders.append({'side': 'buy', 'qty': b['quantity'], 'price': b['price'], 'type': 'limit'})
+        for s in ideal_sells:
+             ideal_orders.append({'side': 'sell', 'qty': s['quantity'], 'price': s['price'], 'type': 'limit'})
+             
+        print(f"[Geometric Grid] Generated {len(ideal_orders)} ideal orders.")
+
+        # 4. Diff & Rebalance
+        to_create = []
+        to_cancel = []
         
-        print(f"\n[Balance Check - Post-Grid]")
-        print(f"  USDT Free: ${usdt_free:.2f} → ${post_usdt_free:.2f} (Δ: ${post_usdt_free - usdt_free:.2f})")
-        print(f"  ETH Free: {eth_free:.4f} → {post_eth_free:.4f} (Δ: {post_eth_free - eth_free:.4f})")
-        print(f"{'='*70}\n")
+        # Match Open Orders with Ideal Orders
+        # We try to find an "Approximate Match" for each open order in the ideal list
+        # If found, we remove it from ideal list (it's satisfied). 
+        # If not found, mark for cancellation.
+        # Remaining ideal orders are marked for creation.
         
+        # Copy ideal list to consume
+        unmet_ideal = ideal_orders.copy()
+        
+        print(f"[Smart Grid] Reconciling {len(open_orders)} Open vs {len(ideal_orders)} Ideal...")
+        
+        for order in open_orders:
+            match_found = False
+            for i, ideal in enumerate(unmet_ideal):
+                # Match logic: Same Side, Same Type, Price +/- 0.5%, Qty +/- 5%
+                price_match = abs(order['price'] - ideal['price']) / ideal['price'] < 0.005
+                qty_match = abs(order['amount'] - ideal['qty']) / ideal['qty'] < 0.05
+                
+                if order['side'] == ideal['side'] and price_match and qty_match:
+                    match_found = True
+                    # Remove from unmet, as this order satisfies it
+                    unmet_ideal.pop(i) 
+                    # print(f"  ✓ Order matches ideal: {order['side']} @ {order['price']}")
+                    break
+            
+            if not match_found:
+                to_cancel.append(order)
+                
+        to_create = unmet_ideal
+        
+        # 5. Execute Diff
+        print(f"[Smart Grid] Action Plan: Cancel {len(to_cancel)}, Create {len(to_create)}")
+        
+        # A. Cancel first (to free balance)
+        for order in to_cancel:
+            try:
+                print(f"  ✗ Cancelling: {order['side']} {order['amount']} @ {order['price']}")
+                self.exchange.cancel_order(order['id'], self.symbol)
+            except Exception as e:
+                print(f"    Error canceling {order['id']}: {e}")
+                
+        # B. Create new
+        for order in to_create:
+            try:
+                if order['side'] == 'buy':
+                    self.exchange.create_limit_buy_order(self.symbol, order['qty'], order['price'])
+                else:
+                    self.exchange.create_limit_sell_order(self.symbol, order['qty'], order['price'])
+                print(f"  ✓ Created: {order['side']} {order['qty']} @ {order['price']}")
+            except Exception as e:
+                 print(f"    Error creating {order['side']}: {e}")
+
+        print(f"Smart Grid Rebalancing Complete.\n")
+
     def execute_trend(self, direction):
         # logging.info(f"Verifying TREND Position: {direction}") 
         # Don't print every minute unless actionable, or use debug level.
@@ -1113,28 +1313,28 @@ class BinanceBot:
             target_value = total_equity * 0.95
             print(f"[Trend] Total Equity: ${total_equity:.2f} | Target: ${target_value:.2f}")
             
-            # 3. Calc Current ETH Value
+            # 3. Calc Current Base Asset Value
             balance = self.exchange.fetch_balance()
-            eth_bal = balance['total'].get('ETH', 0)
-            current_val = eth_bal * price
+            base_bal = balance['total'].get(self.base_asset, 0)
+            current_val = base_bal * price
             
             # 3. Calc Deficit
-            deficit_usdt = target_value - current_val
+            deficit_quote = target_value - current_val
             
-            if deficit_usdt < 10.0: # Minimum interaction threshold ($10)
-                print(f"Already positioned (Deficit ${deficit_usdt:.2f} < $10). Holding.")
+            if deficit_quote < 10.0: # Minimum interaction threshold ($10)
+                print(f"Already positioned (Deficit ${deficit_quote:.2f} < $10). Holding.")
                 return
             
             # 4. Calc Qty to Buy
-            qty = deficit_usdt / price
+            qty = deficit_quote / price
             
-            # 5. Check actual USDT validity and use available balance
-            usdt_bal = balance['free'].get('USDT', 0)
-            if usdt_bal < (qty * price):
-                # Use whatever USDT is available (99% for fees)
-                print(f"[Balance Safety] Calculated qty needs ${qty * price:.2f}, but only ${usdt_bal:.2f} available")
+            # 5. Check actual Quote validity and use available balance
+            quote_bal = balance['free'].get(self.quote_asset, 0)
+            if quote_bal < (qty * price):
+                # Use whatever Quote is available (99% for fees)
+                print(f"[Balance Safety] Calculated qty needs ${qty * price:.2f}, but only ${quote_bal:.2f} available")
                 print(f"[Balance Safety] Using available balance instead")
-                max_buy_val = usdt_bal * 0.99  # Safety for fees
+                max_buy_val = quote_bal * 0.99  # Safety for fees
                 qty = max_buy_val / price
                 
                 # If still too small, skip
@@ -1143,17 +1343,23 @@ class BinanceBot:
                     return
             
         elif side == 'sell':
-            # For SHORT, sell ETH to reach target
-            # Use available (free) ETH balance
-            eth_bal = balance['free'].get('ETH', 0)
+            # For SHORT, sell Base to reach target
+            # Use available (free) Base balance
+            balance = self.exchange.fetch_balance() # Ensure balance is fresh for this branch
+            base_bal = balance['free'].get(self.base_asset, 0)
             
-            if eth_bal < 0.001:
-                print("[Balance Safety] No free ETH available to sell.")
+            if base_bal < 0.001:
+                print(f"[Balance Safety] No free {self.base_asset} available to sell.")
                 return
             
             # Calculate qty needed, but cap at available
-            qty_needed = deficit_usdt / price if 'deficit_usdt' in locals() else eth_bal
-            qty = min(qty_needed, eth_bal * 0.99)  # Use available, with safety margin
+            # The 'deficit_quote' variable is only defined in the 'buy' branch.
+            # For a 'sell' in trend, we're likely reducing Base exposure.
+            # A simpler approach for 'sell' trend is to sell a fixed percentage of available Base,
+            # or to sell down to a target Quote percentage.
+            # For now, let's assume 'qty_needed' would be derived from a target Base balance.
+            # If we're just selling available Base, then 'qty' is simply 'base_bal'.
+            qty = base_bal * 0.99 # Sell most of available Base
             
             print(f"[Balance Safety] Free ETH: {eth_bal:.4f}, Using: {qty:.4f}")
             
@@ -1187,33 +1393,244 @@ class BinanceBot:
         return ticker['last']
 
 
+    def update_ema(self):
+        """
+        Update Long and Short EMAs for Trend Following.
+        """
+        try:
+            # 1. Fetch OHLCV (enough for long EMA)
+            long_span = self.config.get('ema_settings', {}).get('long_term_span', 1000)
+            short_span = self.config.get('ema_settings', {}).get('short_term_span', 100)
+            
+            limit = long_span + 100
+            ohlcv = self.exchange.fetch_ohlcv(self.symbol, timeframe='1m', limit=limit)
+             
+            if not ohlcv: return
+             
+            closes = [x[4] for x in ohlcv]
+            df = pd.Series(closes)
+             
+            self.ema_long = df.ewm(span=long_span).mean().iloc[-1]
+            self.ema_short = df.ewm(span=short_span).mean().iloc[-1]
+            
+            # log occasionaly
+            if int(time.time()) % 300 < 10:
+                print(f"[EMA] Long ({long_span}): {self.ema_long:.2f} | Short ({short_span}): {self.ema_short:.2f}")
+                
+        except Exception as e:
+            print(f"EMA Error: {e}")
+
+    def get_neutral_price(self):
+        """
+        Get the Neutral Price for Grid Centering.
+        If EMA is available, use EMA (Trend Following).
+        Else, use Current Market Price.
+        """
+        if hasattr(self, 'ema_long') and self.ema_long > 0:
+            # Passivbot often uses the Long EMA as the "Center" of the grid
+            return self.ema_long
+        
+        return self.get_market_price()
+
+    # ==================== FORAGER ====================
+    def calc_volatility(self, symbol, lookback_minutes=60):
+        """
+        Calculate volatility as mean((high - low) / close) for recent 1m candles.
+        This is Passivbot's 'log-range' volatility measure.
+        """
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe='1m', limit=lookback_minutes)
+            if not ohlcv or len(ohlcv) < 10:
+                return 0.0
+            
+            ranges = []
+            for candle in ohlcv:
+                high, low, close = candle[2], candle[3], candle[4]
+                if close > 0:
+                    ranges.append((high - low) / close)
+            
+            return sum(ranges) / len(ranges) if ranges else 0.0
+        except Exception as e:
+            print(f"[Forager] Volatility calc failed for {symbol}: {e}")
+            return 0.0
+
+    def calc_volume(self, symbol, lookback_minutes=60):
+        """
+        Calculate average quote volume over recent 1m candles.
+        """
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe='1m', limit=lookback_minutes)
+            if not ohlcv or len(ohlcv) < 10:
+                return 0.0
+            
+            # Volume is typically in base, multiply by close for quote volume
+            volumes = [candle[5] * candle[4] for candle in ohlcv]
+            return sum(volumes) / len(volumes) if volumes else 0.0
+        except Exception as e:
+            print(f"[Forager] Volume calc failed for {symbol}: {e}")
+            return 0.0
+
+    def select_forager_coins(self):
+        """
+        Select symbols to trade.
+        - 'symbols' list = ALWAYS active (core coins)
+        - Forager ON = Adds best N from 'approved_symbols' to core list
+        """
+        # Core symbols - always trade these
+        core_symbols = self.config.get('symbols', [])
+        
+        forager_config = self.config.get('forager', {})
+        
+        if not forager_config.get('enabled', False):
+            # Forager disabled - just trade core symbols
+            if core_symbols:
+                return core_symbols
+            else:
+                return [self.symbol]  # Fallback
+        
+        # Forager enabled - add best coins to core
+        approved = forager_config.get('approved_symbols', [])
+        
+        # Remove core symbols from approved pool (don't double-count)
+        approved = [s for s in approved if s not in core_symbols]
+        
+        if not approved:
+            print("[Forager] No additional approved symbols to scan.")
+            return core_symbols if core_symbols else [self.symbol]
+        
+        max_positions = forager_config.get('max_positions', 3)
+        volume_drop_pct = forager_config.get('volume_drop_pct', 0.25)
+        vol_lookback = forager_config.get('volatility_lookback_minutes', 60)
+        volume_lookback = forager_config.get('volume_lookback_minutes', 60)
+        
+        print(f"[Forager] Core symbols: {core_symbols}")
+        print(f"[Forager] Scanning {len(approved)} additional symbols...")
+        
+        # Calculate metrics for approved symbols
+        coin_metrics = []
+        for symbol in approved:
+            try:
+                volatility = self.calc_volatility(symbol, vol_lookback)
+                volume = self.calc_volume(symbol, volume_lookback)
+                coin_metrics.append({
+                    'symbol': symbol,
+                    'volatility': volatility,
+                    'volume': volume
+                })
+            except Exception as e:
+                print(f"[Forager] Skipping {symbol}: {e}")
+        
+        if not coin_metrics:
+            return core_symbols if core_symbols else [self.symbol]
+        
+        # Step 1: Sort by volume and drop lowest X%
+        coin_metrics.sort(key=lambda x: x['volume'], reverse=True)
+        keep_count = int(len(coin_metrics) * (1 - volume_drop_pct))
+        coin_metrics = coin_metrics[:max(keep_count, 1)]
+        
+        # Step 2: Sort remaining by volatility (highest first)
+        coin_metrics.sort(key=lambda x: x['volatility'], reverse=True)
+        
+        # Step 3: Take top N
+        forager_picks = [c['symbol'] for c in coin_metrics[:max_positions]]
+        
+        print(f"[Forager] Adding {len(forager_picks)} symbols: {forager_picks}")
+        for c in coin_metrics[:max_positions]:
+            print(f"  - {c['symbol']}: vol={c['volatility']:.6f}, volume={c['volume']:.0f}")
+        
+        # Combine: Core + Forager picks
+        all_symbols = list(core_symbols) + forager_picks
+        print(f"[Forager] Total active symbols: {all_symbols}")
+        
+        return all_symbols
+
+    def maintain_recursive_grid(self):
+        """
+        Passivbot "Recursive" Grid Maintenance.
+        Constantly recalculates the Ideal Grid based on:
+        1. Current Neutral Price (EMA)
+        2. Current Equity
+        
+        And then aligns open orders to this Ideal Grid.
+        """
+        try:
+            # Anti-flapping
+            if hasattr(self, 'last_grid_update_time'):
+                if time.time() - self.last_grid_update_time < 5: return
+
+            # 1. Get Ideal Grid based on Neutral Price
+            neutral_price = self.get_neutral_price()
+            ideal_buys, ideal_sells = self.calculate_ideal_grid(neutral_price)
+            
+            # Flatten
+            ideal_orders = []
+            for b in ideal_buys: ideal_orders.append({'side': 'buy', 'qty': b['quantity'], 'price': b['price']})
+            for s in ideal_sells: ideal_orders.append({'side': 'sell', 'qty': s['quantity'], 'price': s['price']})
+            
+            # 2. Get Actual Orders
+            actual_orders = self.exchange.fetch_open_orders(self.symbol)
+            
+            # 3. Compare & Rebalance
+            orders_to_cancel, orders_to_place = self.compare_grids(ideal_orders, actual_orders)
+            
+            if not orders_to_cancel and not orders_to_place: return
+
+            print(f"\n[Recursive Grid] Rebalancing around ${neutral_price:.2f}...")
+            
+            # Cancel
+            for order in orders_to_cancel:
+                try:
+                    self.exchange.cancel_order(order['id'], self.symbol)
+                except: pass
+            
+            # Place
+            for order in orders_to_place:
+                try:
+                    if order['side'] == 'buy':
+                        self.exchange.create_limit_buy_order(self.symbol, order['qty'], order['price'])
+                    else:
+                        self.exchange.create_limit_sell_order(self.symbol, order['qty'], order['price'])
+                except: pass
+                
+            self.last_grid_update_time = time.time()
+            
+        except Exception as e:
+            print(f"Recursive Grid Error: {e}")
+
     def run(self):
         print("Bot Started. Press Ctrl+C to stop.")
         
         # State Tracking
         last_prediction_time = None
+        last_config_reload = time.time()
         current_signal = "NEUTRAL"
-        current_grid_center = None
         
-        # Initialize balance tracking for colored logging
-        total_usdt, total_eth, total_equity = self.fetch_equity()
-        self.last_eth_balance = total_eth
-        self.last_usdt_balance = total_usdt
+        # Initialize balance tracking
+        self.fetch_equity()
         
         PREDICTION_INTERVAL = 4 * 3600 # 4 Hours
+        CONFIG_RELOAD_INTERVAL = 5 * 60  # 5 Minutes - check for config changes
         
         while True:
             try:
                 now = time.time()
-                time_since_last = 0  # Initialize to prevent reference errors
+                time_since_last = 0 
                 
+                # --- 0. HOT-RELOAD CONFIG (Every 5 minutes) ---
+                if now - last_config_reload >= CONFIG_RELOAD_INTERVAL:
+                    self.hot_reload_config()
+                    last_config_reload = now
+                
+                # --- 0.5 UPDATE EMA (Every minute) ---
+                if int(now) % 60 < 10:
+                    self.update_ema()
+
                 # --- 1. PREDICTION LOGIC (Every 4 Hours) ---
                 if last_prediction_time is None or (now - last_prediction_time >= PREDICTION_INTERVAL):
                     print("\n[AI] Time for new prediction...")
                     signal, price, pred = self.get_signal()
                     
                     if signal is None:
-                        print(">> ABORT: Missing Data. Skipping this cycle & Waiting 60s.")
                         time.sleep(60) 
                         continue
                         
@@ -1221,124 +1638,26 @@ class BinanceBot:
                     last_prediction_time = now
                     print(f"[AI] New Signal: {signal} | Next prediction in 4 hours")
                     
-                    # Force Grid Reset on new signal
-                    if signal == "GRID":
-                        current_grid_center = None 
-                else:
-                    # Just fetch current price for maintenance
-                    price = self.get_market_price()
-                    time_since_last = now - last_prediction_time
-                    time_until_next = PREDICTION_INTERVAL - time_since_last
-                    hours_until = time_until_next / 3600
-                    # Print this occasionally (every 10 minutes)
-                    if int(time_since_last) % 600 < 60:
-                        print(f"[Timer] Next AI prediction in {hours_until:.1f} hours")
-                    
                 # --- 2. AUTO-UNSTUCK CHECK ---
-                # Check if position needs unstucking before executing strategy
                 check_interval = 5 if self.aggressive_mode else 60
-                if last_prediction_time and int(time_since_last) % 60 < check_interval:
+                if last_prediction_time and int(now) % 60 < check_interval:
                     self.auto_unstuck()
                 
                 # --- 3. TRAILING CLOSE CHECK ---
-                # Check for profitable trailing close opportunities
-                if last_prediction_time and int(time_since_last) % 60 < check_interval:
+                if last_prediction_time and int(now) % 60 < check_interval:
+                    price = self.get_market_price()
                     self.check_trailing_close(price)
                 
-                # --- 4. CLOSE GRID DEPLOYMENT (Every 5 Minutes) ---
-                # Deploy TP grid if position is profitable
+                # --- 4. CLOSE GRID DEPLOYMENT ---
                 if int(time.time()) % 300 < check_interval:
                     self.deploy_close_grid()
                 
-                # --- 5. GRID MANAGEMENT ---
-                if current_signal == "GRID":
-                    if current_grid_center is None:
-                        # Deploy Initial Grid
-                        print(f"\n[Grid] Deploying initial grid...")
-                        self.execute_grid(price)
-                        current_grid_center = price
-                    else:
-                        if self.aggressive_mode:
-                            # AGGRESSIVE MODE: Proactive grid maintenance (Passivbot)
-                            self.maintain_ideal_grid(price)
-                            
-                            # Update grid center if price deviates significantly
-                            deviation = abs(price - current_grid_center) / current_grid_center
-                            if deviation > 0.02:  # 2% deviation
-                                print(f"\n[Grid] Price deviated {deviation*100:.1f}% from center. Recentering...")
-                                self.execute_grid(price)
-                                current_grid_center = price
-                        else:
-                            # CONSERVATIVE MODE: Reactive grid replenishment (Original)
-                            try:
-                                open_orders = self.exchange.fetch_open_orders(self.symbol)
-                                
-                                # If we have fewer than 4 orders, grid needs replenishment
-                                if len(open_orders) < 4:
-                                    print(f"\n{'='*70}")
-                                    print(f"[Grid Replenishment] {len(open_orders)} orders remaining (< 4)")
-                                    print(f"{'='*70}")
-                                    
-                                    # Show what orders are still open
-                                    if open_orders:
-                                        print(f"[Remaining Orders]")
-                                        for order in open_orders:
-                                            side = order['side'].upper()
-                                            print(f"  {side}: {order['amount']:.4f} ETH @ ${order['price']:.2f}")
-                                    
-                                    # Fetch current balance to show what changed
-                                    current_usdt, current_eth, current_equity = self.fetch_equity()
-                                    
-                                    # Determine if we bought or sold by comparing ETH balance
-                                    if not hasattr(self, 'last_eth_balance'):
-                                        self.last_eth_balance = current_eth
-                                        self.last_usdt_balance = current_usdt
-                                    
-                                    eth_change = current_eth - self.last_eth_balance
-                                    usdt_change = current_usdt - self.last_usdt_balance
-                                    
-                                    # Color code based on what happened
-                                    if eth_change > 0.0001:  # Bought ETH
-                                        color = Colors.GREEN
-                                        action = "BOUGHT ETH"
-                                    elif eth_change < -0.0001:  # Sold ETH
-                                        color = Colors.RED
-                                        action = "SOLD ETH"
-                                    else:
-                                        color = Colors.RESET
-                                        action = "NO CHANGE"
-                                    
-                                    print(f"\n{color}[Balance Changes - {action}]{Colors.RESET}")
-                                    print(f"{color}  USDT: ${self.last_usdt_balance:.2f} → ${current_usdt:.2f} (Δ: ${usdt_change:+.2f}){Colors.RESET}")
-                                    print(f"{color}  ETH: {self.last_eth_balance:.4f} → {current_eth:.4f} (Δ: {eth_change:+.4f}){Colors.RESET}")
-                                    print(f"  Total Equity: ${current_equity:.2f}")
-                                    
-                                    # Update tracking
-                                    self.last_eth_balance = current_eth
-                                    self.last_usdt_balance = current_usdt
-                                    
-                                    print(f"\n[Action] Redeploying grid with updated balances...")
-                                    self.execute_grid(price)
-                                    current_grid_center = price
-                                else:
-                                    # Check Deviation
-                                    deviation = abs(price - current_grid_center) / current_grid_center
-                                    if deviation > 0.02:  # 2% Deviation Threshold
-                                        print(f"Price deviation {deviation*100:.2f}% > 2%. Recentering Grid...")
-                                        self.execute_grid(price)
-                                        current_grid_center = price
-                                    else:
-                                        print("Grid is within range. holding.")
-                            except Exception as e:
-                                print(f"[Grid] Error checking orders: {e}")
-                                print("Grid is within range. holding.")
-                            
-                else:
-                    # Trend Logic (Maintain Position)
-                    # Only execute every 60 seconds to avoid excessive trades
-                    if last_prediction_time and int(time_since_last) % 60 < check_interval:
-                        self.execute_trend(current_signal)
-                    
+                # --- 5. RECURSIVE GRID MAINTENANCE ---
+                # Replaces the old "Grid Management" block
+                if current_signal == "GRID" or self.aggressive_mode:
+                    # In Passivbot, grid is always maintained relative to Neutral Price
+                    self.maintain_recursive_grid()
+                
                 # Sleep based on mode
                 sleep_interval = 5 if self.aggressive_mode else 60
                 time.sleep(sleep_interval)
@@ -1353,17 +1672,10 @@ class BinanceBot:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Binance Trading Bot")
-    parser.add_argument('--symbol', type=str, default='ETH/USDT', help='Trading Pair')
-    parser.add_argument('--amount', type=float, default=1000, help='Capital Limit in USDT')
-    parser.add_argument('--live', action='store_true', help='ENABLE REAL MONEY TRADING (Mainnet). Default is False (Testnet).')
-    parser.add_argument('--aggressive', action='store_true', help='Enable aggressive mode (5s checks, proactive grid). Default is conservative (60s checks, reactive grid).')
+    # Args are now optional/overrides since we have config.json
+    parser.add_argument('--config', type=str, default='config.json', help='Path to config file')
     
     args = parser.parse_args()
     
-    bot = BinanceBot(
-        symbol=args.symbol, 
-        capital_limit=args.amount,
-        live_mode=args.live,
-        aggressive_mode=args.aggressive
-    )
+    bot = BinanceBot(config_path=args.config)
     bot.run()
