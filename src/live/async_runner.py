@@ -36,7 +36,7 @@ class AsyncMultiSymbolBot:
     """
     
     def __init__(self, config_path='config.json'):
-        load_dotenv()
+        # load_dotenv() - Handled in main.py
         self.config_path = config_path
         self.config = self.load_config()
         
@@ -54,6 +54,9 @@ class AsyncMultiSymbolBot:
         self.adx = {}
         self.ema_slope = {}
         self.garch_vol = {}
+        
+        # Trailing Stop State
+        self.trailing_high_water_mark = {}  # Highest price since activation
         
         # Wallet tracking (Passivbot style)
         self.total_equity = 0
@@ -595,8 +598,16 @@ class AsyncMultiSymbolBot:
             ema_l = self.ema_long.get(symbol, current_price)
             ema_s = self.ema_short.get(symbol, current_price)
             
-            # Neutral price is long-term EMA
+            # Neutral price default is long-term EMA
             neutral_price = ema_l
+            
+            # --- ADAPTIVE ANCHORING ---
+            # If trend is strong (ADX > 25), anchor to Short-Term EMA to catch shallow dips
+            adx_val = self.adx.get(symbol, 0)
+            if adx_val > 25:
+                neutral_price = ema_s
+                # if int(time.time()) % 60 < 5:
+                #    logger.debug(f"[{symbol}] Strong Trend (ADX {adx_val:.1f}) -> Using EMA-Short as Anchor")
             
             # Get config
             grid_settings = self.config.get('grid_settings', {})
@@ -608,6 +619,27 @@ class AsyncMultiSymbolBot:
             # --- SMART GRID MANAGER ---
             smart_conf = self.config.get('smart_grid', {})
             if smart_conf.get('enabled', False):
+                # --- RSI PANIC SELL ---
+                rsi = self.rsi.get(symbol, 50)
+                rsi_sell_thresh = smart_conf.get('rsi_sell_threshold', 90)
+                
+                if rsi > rsi_sell_thresh:
+                    if int(time.time()) % 60 < 5:
+                        logger.critical(f"[{symbol}] RSI {rsi:.1f} > {rsi_sell_thresh} -> PANIC SELL ACTIVATED! Dumping position.")
+                    
+                    # 1. Cancel all orders to free up locked funds
+                    await self.cancel_symbol_orders(symbol)
+                    
+                    # 2. Sell everything (Aggressive Limit Sell)
+                    free_amount = position.get('free', 0)
+                    
+                    if free_amount > 0:
+                        # Sell 2% below price to ensure fill (taker)
+                        sell_price = current_price * 0.98
+                        await self.place_limit_order(symbol, 'sell', free_amount, sell_price)
+                    
+                    return # STOP PROCESSING (No Buys)
+
                 # 1. Volatility Adaptation (GARCH) + Trend Scaling (ADX)
                 garch = self.garch_vol.get(symbol, 0)
                 adx = self.adx.get(symbol, 0)
@@ -794,8 +826,74 @@ class AsyncMultiSymbolBot:
                     if not is_valid:
                         await self.cancel_order(symbol, order['id'])
 
+                # --- TRAILING STOP LOGIC ---
+                trailing_conf = self.config.get('trailing_settings', {})
+                trailing_enabled = trailing_conf.get('entry_trailing_threshold_pct', 0) > 0 or \
+                                   trailing_conf.get('close_trailing_threshold_pct', 0) > 0 # Use any non-zero as enablement check
+                
+                activation_pct = trailing_conf.get('close_trailing_threshold_pct', 0.02)
+                callback_pct = trailing_conf.get('close_trailing_retracement_pct', 0.005)
+                
+                current_value = position.get('value_usdt', 0)
+                # Calculate avg entry roughly (if not tracked, use naive estimate or rely on first read)
+                # Ideally we track avg_entry. For now, we assume if we have a position, we track PnL vs BreakEven
+                # Simplifying: We start trailing when Price > Neutral Price * (1 + activation)
+                # OR more accurately: Price > Avg Entry * (1 + activation)
+                
+                # Since we don't have robust avg_entry in 'positions' map (it comes from balance which sums amounts),
+                # we will use the 'neutral_price' (EMA) or just check simply if price is pumping relative to grid.
+                
+                # IMPROVEMENT: Use 'break_even_price' if exchange supports it, or estimate from recent trades.
+                # For this implementation, we will Trigger Trailing when Price > Last Price recorded + activation
+                
+                # Robust Logic:
+                avg_entry_price = position.get('avgEntryPrice', 0) 
+                # Note: ccxt balance fetch might not give avgEntryPrice. 
+                # If 0, fallback to neutral_price as baseline.
+                if avg_entry_price == 0:
+                    avg_entry_price = neutral_price
+                
+                pnl_pct = (current_price - avg_entry_price) / avg_entry_price
+                
+                # 1. CHECK ACTIVATION
+                if pnl_pct > activation_pct:
+                    # Update High Water Mark
+                    last_hwm = self.trailing_high_water_mark.get(symbol, 0)
+                    if current_price > last_hwm:
+                        self.trailing_high_water_mark[symbol] = current_price
+                        # Log new high
+                        if current_price > last_hwm * 1.005: 
+                             logger.info(f"[{symbol}] Trailing Profit New High: {current_price:.4f} (PnL: {pnl_pct:.2%})")
+                    
+                    # 2. CHECK TRIGGER (Retracement)
+                    hwm = self.trailing_high_water_mark.get(symbol, current_price)
+                    stop_price = hwm * (1 - callback_pct)
+                    
+                    if current_price < stop_price:
+                        logger.info(f"[{symbol}] 🛑 TRAILING STOP HIT! Price: {current_price:.4f} < Stop: {stop_price:.4f}")
+                        # SELL ALMOST EVERYTHING (Leave dust or sell 100%)
+                        sell_qty = free_amount 
+                        if sell_qty > 0:
+                            # Cancel limits first to free up locked amount? 
+                            # If we use 'free_amount', we only sell what's not in limit orders.
+                            # Better: Cancel ALL sells to free up full stack, then sell.
+                            await self.cancel_symbol_orders(symbol)
+                            
+                            # Re-fetch balance to be safe or just use known total
+                            # Fast path: just sell known pos amount
+                            total_pos = position.get('amount', 0)
+                            if total_pos > 0:
+                                await self.place_limit_order(symbol, 'sell', total_pos, current_price * 0.99) # Limit 'market' sell
+                                # RESET HWM
+                                self.trailing_high_water_mark[symbol] = 0
+                                return # Done for this tick
+
+                # If NOT trailing (or price not high enough), proceed to GRID logic
+                
                 # --- 2. PLACE MISSING SELLS ---
                 free_amount = position.get('free', 0)
+                if free_amount <= 0: return # Nothing to sell if not trailing
+                
                 sell_qty_chunk = free_amount / max(len(sell_prices), 1)
                 
                 for i, price in enumerate(sell_prices):

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 import mlflow
 import datetime
 
-load_dotenv()
+# load_dotenv() - Moved to main()
 
 def run_pipeline(config):
     symbol = config.get('symbol', 'ETH/USDT')
@@ -62,8 +62,12 @@ def main():
     parser.add_argument('--aggressive', action='store_true', help='Enable aggressive mode (5s checks, proactive grid). Default is conservative (60s checks, reactive grid).')
     parser.add_argument('--config', type=str, default='config.json', help='Path to strategy config file (required for live mode)')
     parser.add_argument('--async-mode', action='store_true', dest='async_mode', help='Use async runner (Passivbot style - faster)')
+    parser.add_argument('--env-file', type=str, default='.env', help='Path to environment file (default: .env)')
     
     args = parser.parse_args()
+
+    # Load environment variables
+    load_dotenv(args.env_file, override=True)
     
     # Handle dashboard mode
     if hasattr(args, 'mode') and args.mode == 'dashboard':

@@ -22,3 +22,12 @@ passivbot_repo/
 # Keep specific guide if needed, but ignore large docker tars
 eth-bot-docker.tar.gz
 eth-bot_v0.0.1.zip
+
+# Local env files
+.env_riz
+
+# Large data files
+*.tif
+
+# Debug logs
+debug_output.txt

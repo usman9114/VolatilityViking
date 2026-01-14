@@ -1,3 +1,3 @@
-# Dashboard Requirements
 streamlit>=1.28.0
 plotly>=5.17.0
+matplotlib>=3.8.0

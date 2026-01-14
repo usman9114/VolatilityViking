@@ -6,16 +6,17 @@
     "live_mode": true,
     "aggressive_mode": false,
     "wallet_exposure_limit": 1.0,
-    "core_wallet_exposure": 0.50,
-    "forager_wallet_exposure": 0.15,
+    "core_wallet_exposure": 1.0,
+    "forager_wallet_exposure": 0.20,
     "total_wallet_exposure_limit": 1.5,
-    "max_drawdown_pct": 0.2,
+    "max_drawdown_pct": 0.3,
     "smart_grid": {
         "enabled": true,
         "volatility_scale": 0.80,
         "trend_bias_strength": 0.0,
         "atr_period": 14,
-        "rsi_period": 14
+        "rsi_period": 14,
+        "rsi_sell_threshold": 90
     },
     "regime_filter": {
         "enabled": true,
@@ -50,9 +51,9 @@
         "unstuck_price_distance_threshold": 0.2
     },
     "trailing_settings": {
-        "close_trailing_threshold_pct": 0.02,
-        "close_trailing_retracement_pct": 0.005,
-        "close_trailing_qty_pct": 0.2,
+        "close_trailing_threshold_pct": 0.03,
+        "close_trailing_retracement_pct": 0.01,
+        "close_trailing_qty_pct": 1.0,
         "entry_trailing_threshold_pct": 0.01,
         "entry_trailing_retracement_pct": 0.003
     },
