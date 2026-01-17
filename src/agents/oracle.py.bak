@@ -1,0 +1,261 @@
+import logging
+import json
+import asyncio
+import pandas as pd
+from src.agents.base_agent import BaseAgent, logger
+from src.ai.rag_memory import MarketMemory
+from src.ai.features import calculate_alpha_features
+from src.ai.utils import call_openai_with_retry
+from src.ai.model_manager import ModelManager
+
+class OracleAgent(BaseAgent):
+    """
+    The Oracle: RAG-based Pattern Matching Agent.
+    Predicts future price action by finding similar historical market setups.
+    """
+    def __init__(self):
+        super().__init__()
+        self.memory = None
+        try:
+            self.memory = MarketMemory() # connect to ChromaDB
+        except Exception as e:
+            logger.error(f"[{self.name}] ⚠️ CRITICAL: Failed to load MarketMemory (Vector DB). Oracle is BLIND. Error: {e}")
+        
+        self.model_manager = ModelManager()
+        
+        # OpenAI client for synthesis
+        import os
+        from openai import OpenAI
+        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+    async def analyze_symbol(self, symbol: str, df: pd.DataFrame, btc_context: str = "Neutral"):
+        """
+        Analyze a single symbol using RAG.
+        1. Calculate technical features on live data.
+        2. Create semantic description (embedding query).
+        3. Retrieve similar historical patterns.
+        4. Synthesize prediction using LLM (with BTC context).
+        """
+        if df.empty or len(df) < 50:
+            logger.warning(f"[{self.name}] Not enough data for {symbol}.")
+            return None
+
+        # 1. Feature Engineering
+        # We need to run this on the dataframe. 
+        # Note: calculate_alpha_features expects standard ohlcv columns.
+        # Ensure df has timestamps sorted
+        df = df.sort_values('timestamp')
+        enriched_df = calculate_alpha_features(df.copy())
+        
+        # Get the latest snapshot (the "now")
+        current_row = enriched_df.iloc[-1]
+        
+        if not self.memory:
+            logger.warning(f"[{self.name}] Memory unavailable. Skipping analysis.")
+            return None
+
+        # 2. Semantic Query
+        query_text = self.memory.semanticize_snapshot(current_row, symbol)
+        logger.info(f"[{self.name}] Query: {query_text}")
+        
+        # 3. Retrieve
+        matches = self.memory.query_similar_patterns(query_text, n_results=10)
+        if not matches:
+            logger.warning(f"[{self.name}] No matches found for {symbol}.")
+            return None
+            
+        # 4. Synthesize (The "Prophecy")
+        prediction = await self._generate_prophecy(symbol, query_text, matches, btc_context)
+        return prediction
+
+    async def _generate_prophecy(self, symbol, current_ctx, matches, btc_context="Neutral"):
+        """
+        Uses LLM to interpret the historical matches.
+        """
+        # Summarize matches
+        # --- QUANTITATIVE ANALYSIS (Math-First) ---
+        # Calculate Weighted Probability (XGBoost/KNN style)
+        # Weight = 1 / (1 + distance)
+        
+        total_weight = 0.0
+        weighted_bullish_score = 0.0
+        bullish_count = 0
+        
+        summary_lines = []
+        outcomes_24h = []
+        
+        for i, m in enumerate(matches):
+            meta = m['metadata']
+            ret_24h = meta.get('ret_24h', 0)
+            dist = m.get('distance', 0)
+            
+            # Weight: Closer matches (lower distance) = Higher weight
+            weight = 1.0 / (1.0 + dist)
+            
+            # Outcome Score: 1.0 if > 0.5%, 0.0 if < -0.5%, 0.5 if neutral
+            if ret_24h > 0.005: score = 1.0
+            elif ret_24h < -0.005: score = 0.0
+            else: score = 0.5
+            
+            if ret_24h > 0.002: bullish_count += 1
+            
+            weighted_bullish_score += score * weight
+            total_weight += weight
+            
+            # Log for Prompt
+            summary_lines.append(
+                f"  - Match {i+1} ({meta['symbol']} @ {meta.get('timestamp')}): "
+                f"Result: {ret_24h*100:+.1f}% (Weight: {weight:.2f})"
+            )
+            outcomes_24h.append(ret_24h * 100)
+            
+        # Final Quant Probability
+        if total_weight > 0:
+            math_prob = (weighted_bullish_score / total_weight) * 100
+        else:
+            math_prob = 50.0
+            
+        # --- SIGNAL SQUASHING (High Confidence Only) ---
+        # User Limit: "Only include strong short long cases"
+        # If probability is weak (35-65%), flatten to 50%
+        if 35.0 < math_prob < 65.0:
+            math_prob = 50.0
+            
+        avg_24h = sum(outcomes_24h) / len(outcomes_24h)
+        match_block = "\n".join(summary_lines)
+        
+        # --- LLM SYNTHESIS (Narrator) ---
+        system_msg = (
+            "You are The Oracle, a crypto quant AI. "
+            "You effectively NARRATE the results of a quantitative model. "
+            "Do NOT contradict the model's mathematical probability UNLESS the Global Context (BTC) strongly opposes it."
+        )
+        
+        user_msg = (
+            f"**Current Setup**:\n{current_ctx}\n\n"
+            f"**Global Market Context (BTC Trend)**: {btc_context}\n"
+            f"IMPORTANT: If BTC is CRASHING, the Altcoin will likely dump even if historical matches show a pump.\n\n"
+            f"**Quantitative Model Results**:\n"
+            f"- Historical Pattern Matches:\n{match_block}\n"
+            f"- Weighted Bullish Probability: {math_prob:.1f}%\n"
+            f"- Average 24h Outcome: {avg_24h:+.2f}%\n"
+            f"- Bullish Matches: {bullish_count}/{len(matches)}\n\n"
+            f"**Task**:\n"
+            f"1. Start with the model's probability ({math_prob:.1f}%).\n"
+            f"2. ADJUST it based on Global Context (BTC: {btc_context}).\n"
+            f"   - If BTC is Bullish/Pumping: +10-20% to Bullish Probability.\n"
+            f"   - If BTC is Bearish/Crashing: -10-20% to Bullish Probability.\n"
+            f"3. Explain the adjusted forecast.\n"
+            f"4. Identify the primary risk.\n\n"
+            "Output JSON: {probability_bullish: float (adjusted), confidence: int, reasoning: str, primary_risk: str}"
+            "Keep reasoning concise."
+        )
+
+        try:
+            model_id = self.model_manager.get_model_for_role('analyst') # Use smarter model for synthesis
+            response = await call_openai_with_retry(
+                self.client,  # Use our initialized client
+                model=model_id,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg}
+                ]
+            )
+            
+            if not response:
+                logger.warning(f"[{self.name}] Empty response from LLM")
+                return None
+            
+            # manual json parse
+            clean_resp = response.replace('```json', '').replace('```', '').strip()
+            return json.loads(clean_resp)
+            
+        except Exception as e:
+            logger.error(f"[{self.name}] Prophecy failed: {e}")
+            return None
+
+    async def run(self):
+        """
+        Scheduled execution: Analyzes active portfolio symbols + BTC/ETH.
+        """
+        logger.info(f"[{self.name}] Starting Market Scan...")
+        
+        # 1. Determine symbols to analyze
+        targets = set(['BTC/USDT', 'ETH/USDT']) 
+        config_symbols = self.config.get('symbols', [])
+        targets.update(config_symbols)
+        
+        # Initialize exchange if not exists
+        import ccxt.async_support as ccxt
+        if not hasattr(self, 'exchange') or self.exchange is None:
+             self.exchange = ccxt.binance({'enableRateLimit': True})
+        
+        results = {}
+        
+        try:
+            # 2. Parallel Fetching (Optimized)
+            # First, fetch BTC to establish Global Context
+            btc_context = "Neutral"
+            try:
+                btc_candles = await self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=300)
+                if btc_candles:
+                    btc_df = pd.DataFrame(btc_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    btc_df['ema_50'] = btc_df['close'].ewm(span=50, adjust=False).mean()
+                    btc_df['ema_200'] = btc_df['close'].ewm(span=200, adjust=False).mean()
+                    
+                    last_btc = btc_df.iloc[-1]
+                    if last_btc['ema_50'] > last_btc['ema_200'] * 1.01:
+                        btc_context = "Bullish"
+                    elif last_btc['ema_50'] < last_btc['ema_200'] * 0.99:
+                        btc_context = "Bearish"
+                    
+                    # Crash detection (price far below EMA)
+                    if last_btc['close'] < last_btc['ema_200'] * 0.95:
+                        btc_context = "CRASHING"
+                    elif last_btc['close'] > last_btc['ema_200'] * 1.05:
+                        btc_context = "PUMPING"
+                            
+                    logger.info(f"[{self.name}] 🌍 Global Context (BTC): {btc_context}")
+            except Exception as e:
+                logger.warning(f"[{self.name}] Failed to fetch BTC context: {e}")
+
+            async def process_symbol_task(symbol):
+                try:
+                    candles = await self.exchange.fetch_ohlcv(symbol, '1h', limit=300)
+                    if not candles: return symbol, None
+                    df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    pred = await self.analyze_symbol(symbol, df, btc_context)
+                    return symbol, pred
+                except Exception as e:
+                    logger.error(f"Error processing {symbol}: {e}")
+                    return symbol, None
+
+            # Real Run
+            tasks = [process_symbol_task(sym) for sym in targets]
+            batch_results = await asyncio.gather(*tasks)
+
+            for sym, pred in batch_results:
+                if pred:
+                    results[sym] = pred
+                    prob = pred.get('probability_bullish', 50)
+                    logger.info(f"[{self.name}] {sym} Prophecy: Bullish={prob}% ({pred.get('primary_risk')})")
+                    
+        except Exception as e:
+            logger.error(f"[{self.name}] Scan failed: {e}")
+        # Note: We keeps exchange open for next run, or close it? 
+        # For an agent running every hour, it's better to close and reopen or keep open? 
+        # Actually in this architecture main loop is in meeting_room. 
+        # Let's close it to be safe and avoiding timeout disconnects.
+        finally:
+            await self.exchange.close()
+            self.exchange = None # Reset
+            
+        # 3. Save Report for Governor
+        report_path = "data/oracle_report.json"
+        with open(report_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        logger.info(f"[{self.name}] Report saved to {report_path}")
+
+if __name__ == "__main__":
+    # Test stub
+    pass

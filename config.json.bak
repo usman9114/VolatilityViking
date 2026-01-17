@@ -35,6 +35,10 @@
         "rsi_period": 14,
         "rsi_sell_threshold": 90
     },
+    "safety_settings": {
+        "prevent_loss_sells": true,
+        "min_profit_pct": 0.005
+    },
     "regime_filter": {
         "enabled": true,
         "adx_threshold": 30,
@@ -83,5 +87,17 @@
     "ema_settings": {
         "long_term_span": 1000,
         "short_term_span": 100
+    },
+    "governor": {
+        "auto_manage_symbols": true
+    },
+    "oracle_position_sizing": {
+        "enabled": true,
+        "min_confidence_multiplier": 0.6,
+        "max_confidence_multiplier": 1.3,
+        "high_vol_penalty": 0.75,
+        "medium_vol_penalty": 0.85,
+        "min_position_size": 0.05,
+        "max_position_size": 0.50
     }
 }

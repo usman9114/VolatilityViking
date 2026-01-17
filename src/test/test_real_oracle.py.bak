@@ -1,0 +1,214 @@
+"""
+Real Oracle Accuracy Test - Uses actual OracleAgent with RAG.
+
+Tests Oracle's predictive power EXACTLY as it runs in production.
+"""
+import asyncio
+import ccxt.async_support as ccxt
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import sys
+import json
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.agents.oracle import OracleAgent
+from dotenv import load_dotenv
+
+load_dotenv('profiles/usman/.env')  # Load your profile
+
+
+async def fetch_historical_ohlcv(symbol, days=7):
+    """Fetch historical 1h candles."""
+    exchange = ccxt.binance({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot'}
+    })
+    
+    try:
+        await exchange.load_markets()
+        since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+        
+        all_ohlcv = []
+        while True:
+            ohlcv = await exchange.fetch_ohlcv(symbol, '1h', since=since, limit=1000)
+            if not ohlcv:
+                break
+            all_ohlcv.extend(ohlcv)
+            since = ohlcv[-1][0] + 3600000
+            if len(ohlcv) < 1000:
+                break
+        
+        print(f"✅ Fetched {len(all_ohlcv)} hourly candles for {symbol}")
+        return all_ohlcv
+        
+    finally:
+        await exchange.close()
+
+
+async def test_real_oracle(symbols, days=7):
+    """
+    Test Oracle using REAL production code.
+    
+    For each day:
+    1. Run Oracle.analyze_symbol() with data up to that point
+    2. Check if next 24h price matches Oracle's prediction
+    """
+    print(f"\n🔮 Real Oracle Test - {days} days\n")
+    
+    # Initialize Oracle (with RAG)
+    oracle = OracleAgent()
+    
+    if not oracle.memory:
+        print("❌ RAG Memory not loaded. Run: python tools/build_vector_store.py")
+        return {}
+    
+    results = {}
+    
+    for symbol in symbols:
+        print(f"\n📊 Testing {symbol}...")
+        
+        # Fetch full history for Target AND BTC (for Context)
+        all_candles = await fetch_historical_ohlcv(symbol, days=days)
+        all_btc_candles = await fetch_historical_ohlcv('BTC/USDT', days=days)
+        
+        predictions = []
+        
+        # Test at daily checkpoints (start from day 3 to ensure 72+ candles)
+        for day in range(3, days):
+            checkpoint_idx = day * 24  # 24 hours
+            
+            if checkpoint_idx + 24 >= len(all_candles):
+                break
+            
+            # Data Oracle sees (up to checkpoint)
+            oracle_data = all_candles[:checkpoint_idx]
+            df = pd.DataFrame(oracle_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            # --- CONSTRUCT BTC CONTEXT ---
+            # Mimic OracleAgent.run logic
+            btc_context = "Neutral"
+            if len(all_btc_candles) > checkpoint_idx:
+                btc_data = all_btc_candles[:checkpoint_idx]
+                btc_df = pd.DataFrame(btc_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                
+                # Simple EMA Calc
+                btc_df['ema_50'] = btc_df['close'].ewm(span=50, adjust=False).mean()
+                btc_df['ema_200'] = btc_df['close'].ewm(span=200, adjust=False).mean()
+                
+                last_btc = btc_df.iloc[-1]
+                
+                if last_btc['ema_50'] > last_btc['ema_200'] * 1.01:
+                    btc_context = "Bullish"
+                elif last_btc['ema_50'] < last_btc['ema_200'] * 0.99:
+                    btc_context = "Bearish"
+                
+                if last_btc['close'] < last_btc['ema_200'] * 0.95:
+                    btc_context = "CRASHING"
+                elif last_btc['close'] > last_btc['ema_200'] * 1.05:
+                    btc_context = "PUMPING"
+            
+            # Run REAL Oracle
+            print(f"  Day {day}: Running Oracle on {len(df)} candles... [BTC: {btc_context}]")
+            
+            try:
+                # Pass BTC Context!
+                prophecy = await oracle.analyze_symbol(symbol, df, btc_context)
+                
+                if not prophecy:
+                    print(f"    ⚠️ Oracle returned no prediction")
+                    continue
+                
+                # Extract prediction
+                bullish_prob = prophecy.get('probability_bullish', 50)
+                confidence = prophecy.get('confidence', 50)
+                reasoning = prophecy.get('reasoning', '')
+                
+                # Actual outcome (next 24h)
+                current_price = all_candles[checkpoint_idx][4]  # close
+                future_price = all_candles[checkpoint_idx + 24][4]
+                actual_return = ((future_price - current_price) / current_price) * 100
+                
+                # Did Oracle predict correctly?
+                predicted_bullish = bullish_prob > 50
+                actual_bullish = actual_return > 0
+                correct = predicted_bullish == actual_bullish
+                
+                predictions.append({
+                    'day': day,
+                    'bullish_prob': bullish_prob,
+                    'confidence': confidence,
+                    'predicted': 'LONG' if predicted_bullish else 'SHORT',
+                    'actual_return': actual_return,
+                    'correct': correct,
+                    'reasoning': reasoning[:100]  # Truncate
+                })
+                
+                status = "✅" if correct else "❌"
+                print(f"    {status} Oracle: {bullish_prob}% bullish → {actual_return:+.2f}% actual")
+                
+            except Exception as e:
+                print(f"    ❌ Error: {e}")
+                continue
+        
+        # Calculate metrics
+        if predictions:
+            accuracy = sum(p['correct'] for p in predictions) / len(predictions) * 100
+            
+            long_predictions = [p for p in predictions if p['predicted'] == 'LONG']
+            short_predictions = [p for p in predictions if p['predicted'] == 'SHORT']
+            
+            avg_return_long = np.mean([p['actual_return'] for p in long_predictions]) if long_predictions else 0
+            avg_return_short = np.mean([p['actual_return'] for p in short_predictions]) if short_predictions else 0
+            
+            results[symbol] = {
+                'accuracy': accuracy,
+                'predictions': predictions,
+                'avg_return_long': avg_return_long,
+                'avg_return_short': avg_return_short,
+                'num_long': len(long_predictions),
+                'num_short': len(short_predictions)
+            }
+            
+            print(f"\n  📊 Results:")
+            print(f"    Accuracy: {accuracy:.1f}%")
+            print(f"    Avg return when LONG ({len(long_predictions)} times): {avg_return_long:+.2f}%")
+            print(f"    Avg return when SHORT ({len(short_predictions)} times): {avg_return_short:+.2f}%")
+    
+    return results
+
+
+async def main():
+    symbols = ['AVAX/USDT']  # Test AVAX with new CLEAN DATA
+    results = await test_real_oracle(symbols, days=14)
+    
+    print("\n" + "=" * 70)
+    print("🔮 REAL ORACLE FUTURES VALIDATION")
+    print("=" * 70)
+    
+    for symbol, data in results.items():
+        print(f"\n{symbol}:")
+        print(f"  Directional Accuracy: {data['accuracy']:.1f}%")
+        print(f"  LONG signals: {data['num_long']} (avg: {data['avg_return_long']:+.2f}%)")
+        print(f"  SHORT signals: {data['num_short']} (avg: {data['avg_return_short']:+.2f}%)")
+        
+        # Verdict
+        if data['accuracy'] >= 60:
+            print(f"  ✅ Oracle PASSED - Good for futures on {symbol}")
+        elif data['accuracy'] >= 50:
+            print(f"  ⚠️ Oracle MARGINAL - Needs more data")
+        else:
+            print(f"  ❌ Oracle FAILED - Not reliable for {symbol}")
+    
+    # Save detailed report
+    with open('data/oracle_backtest_results.json', 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"\n📄 Detailed results saved to: data/oracle_backtest_results.json")
+    
+    print("\n" + "=" * 70)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -1,0 +1,10 @@
+{
+    "mcpServers": {
+        "binance": {
+            "command": "/home/usman.qureshi/VolatilityViking/.venv/bin/python",
+            "args": [
+                "/home/usman.qureshi/VolatilityViking/src/mcp/run_binance_mcp.py"
+            ]
+        }
+    }
+}

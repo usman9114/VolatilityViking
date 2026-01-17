@@ -12,6 +12,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 import pandas as pd
 import numpy as np
+from src.live.state_manager import StateManager
 
 
 # Setup logging with profile support
@@ -62,6 +63,9 @@ class AsyncMultiSymbolBot:
         self.ema_slope = {}
         self.garch_vol = {}
         
+        # State Manager (Cost Basis Tracking)
+        self.state_manager = StateManager()
+        
         # Trailing Stop State
         self.trailing_high_water_mark = {}  # Highest price since activation
         
@@ -98,11 +102,16 @@ class AsyncMultiSymbolBot:
             api_key = os.getenv('BINANCE_TESTNET_API_KEY')
             secret = os.getenv('BINANCE_TESTNET_SECRET_KEY')
         
+        
+        futures_enabled = self.config.get('futures_settings', {}).get('enabled', False)
+        default_type = 'future' if futures_enabled else 'spot'
+        logger.info(f"Exchange type: {default_type} (futures_enabled={futures_enabled})")
+        
         self.exchange = ccxt_async.binance({
             'apiKey': api_key,
             'secret': secret,
             'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
+            'options': {'defaultType': default_type}
         })
         
         if not live_mode:
@@ -126,6 +135,8 @@ class AsyncMultiSymbolBot:
             return core + extra
         
         return core if core else ['ETH/USDT']
+    
+
     
     async def fetch_all_data(self, symbols):
         """
@@ -160,36 +171,76 @@ class AsyncMultiSymbolBot:
         CRITICAL: This provides fresh data before ANY order placement.
         """
         try:
-            balance = await self.exchange.fetch_balance()
+            # Check if Futures or Spot
+            is_future = self.exchange.options['defaultType'] == 'future'
             
-            # Total wallet in USDT (quote currency)
-            self.total_wallet_usdt = balance.get('USDT', {}).get('total', 0) or 0
-            self.free_wallet_usdt = balance.get('USDT', {}).get('free', 0) or 0
-            
-            # Calculate value of all holdings
-            total_equity = self.total_wallet_usdt
-            
-            for symbol in symbols:
-                base = symbol.split('/')[0]
-                amount = balance.get(base, {}).get('total', 0) or 0
-                free = balance.get(base, {}).get('free', 0) or 0
+            if is_future:
+                # FUTURES: Fetch Positions explicitly
+                positions = await self.exchange.fetch_positions(symbols)
+                # Map to local dict
+                pos_map = {p['symbol']: p for p in positions}
                 
-                # Get current price for value calculation
-                price = self.last_prices.get(symbol, {}).get('price', 0)
-                value_usdt = amount * price if price else 0
+                # Fetch Balance (Margin)
+                balance = await self.exchange.fetch_balance()
+                self.total_wallet_usdt = balance.get('USDT', {}).get('total', 0)
+                self.free_wallet_usdt = balance.get('USDT', {}).get('free', 0)
                 
-                self.positions[symbol] = {
-                    'amount': amount,
-                    'free': free,
-                    'value_usdt': value_usdt,
-                    'price': price
-                }
+                # Calculate Equity (Wallet + Unrealized PnL)
+                # Note: fetch_balance 'total' in futures usually includes unrealized PnL on Binance? 
+                # Actually usually 'total' is margin. simple logic:
+                self.total_equity = self.total_wallet_usdt # Approximate
                 
-                total_equity += value_usdt
+                for symbol in symbols:
+                    p = pos_map.get(symbol, {})
+                    amount = float(p.get('contracts', 0) or 0)
+                    side = p.get('side', 'long') # 'long' or 'short'
+                    if side == 'short': amount = -amount
+                    
+                    price = self.last_prices.get(symbol, {}).get('price', 0)
+                    value_usdt = abs(amount * price)
+                    
+                    self.positions[symbol] = {
+                        'amount': amount,
+                        'free': amount, # futures don't lock amount in orders usually, but let's assume all free for now
+                        'value_usdt': value_usdt,
+                        'price': price,
+                        'unrealizedPnL': float(p.get('unrealizedPnl', 0) or 0),
+                        'leverage': p.get('leverage', 1)
+                    }
+                    
+                    # Add PnL to Equity for accurate checking
+                    # (Assuming fetch_balance total is Wallet Balance)
+                    # self.total_equity += p.get('unrealizedPnl', 0) - handled by exchange usually?
+            else:
+                # SPOT: Use Balance
+                balance = await self.exchange.fetch_balance()
+                
+                # Total wallet in USDT (quote currency)
+                self.total_wallet_usdt = balance.get('USDT', {}).get('total', 0) or 0
+                self.free_wallet_usdt = balance.get('USDT', {}).get('free', 0) or 0
+                
+                # Calculate value of all holdings
+                self.total_equity = self.total_wallet_usdt
+                
+                for symbol in symbols:
+                    base = symbol.split('/')[0]
+                    amount = balance.get(base, {}).get('total', 0) or 0
+                    free = balance.get(base, {}).get('free', 0) or 0
+                    
+                    # Get current price for value calculation
+                    price = self.last_prices.get(symbol, {}).get('price', 0)
+                    value_usdt = amount * price if price else 0
+                    
+                    self.positions[symbol] = {
+                        'amount': amount,
+                        'free': free,
+                        'value_usdt': value_usdt,
+                        'price': price
+                    }
+                    
+                    self.total_equity += value_usdt
             
-            self.total_equity = total_equity
-            
-            # Calculate wallet exposure per symbol
+            # Calculate wallet exposure per symbol (Shared logic)
             for symbol in symbols:
                 pos = self.positions.get(symbol, {})
                 if self.total_equity > 0:
@@ -240,8 +291,19 @@ class AsyncMultiSymbolBot:
     def check_kill_switch(self):
         """
         Global Kill-Switch - Passivbot Safety Feature
-        Triggers when drawdown exceeds max_drawdown_pct.
+        Triggers when drawdown exceeds max_drawdown_pct
+        OR when 'Red Phone' lock file is present.
         """
+        # 1. Red Phone (Sentinel/Manual)
+        if os.path.exists("signals/kill_switch.lock"):
+            logger.critical("=" * 60)
+            logger.critical(f"🚨 RED PHONE ACTIVATED: signals/kill_switch.lock found! 🚨")
+            logger.critical("HALTING TRADING IMMEDIATELY.")
+            logger.critical("=" * 60)
+            self.kill_switch_active = True
+            return True
+
+        # 2. Drawdown
         if self.peak_equity <= 0:
             return False
         
@@ -438,8 +500,8 @@ class AsyncMultiSymbolBot:
     
     # ==================== GRID CALCULATION ====================
     
-    def calc_geometric_grid(self, center_price, n_orders, spacing_weight=1.2, grid_span=0.30):
-        """Calculate geometric grid prices (Passivbot style)."""
+    def calc_geometric_grid(self, center_price, n_orders, spacing_weight=1.2, grid_span=0.30, side='long'):
+        """Calculate geometric grid prices (Passivbot style). Supports Long/Short."""
         try:
             if n_orders < 1: return []
             
@@ -453,7 +515,11 @@ class AsyncMultiSymbolBot:
             for i in range(n_orders):
                 dist = d0 * pow(spacing_weight, i)
                 cum_dist += dist
-                prices.append(center_price * (1 - cum_dist))
+                
+                if side == 'short':
+                    prices.append(center_price * (1 + cum_dist))
+                else:
+                    prices.append(center_price * (1 - cum_dist))
             
             return prices
         except Exception as e:
@@ -496,6 +562,22 @@ class AsyncMultiSymbolBot:
             market = self._markets.get(symbol, {})
             amount = float(self.exchange.amount_to_precision(symbol, amount))
             price = float(self.exchange.price_to_precision(symbol, price))
+            
+            # --- SAFETY CHECK: Prevent Selling at Loss (Spot) ---
+            is_futures = self.config.get('futures_settings', {}).get('enabled', False)
+            safety_conf = self.config.get('safety_settings', {})
+            
+            if side == 'sell' and not is_futures and safety_conf.get('prevent_loss_sells', False):
+                 avg_entry = self.state_manager.get_avg_entry(symbol)
+                 if avg_entry > 0:
+                     min_profit = safety_conf.get('min_profit_pct', 0.002)
+                     min_price = avg_entry * (1 + min_profit)
+                     
+                     # Allow Panic Sells / Stop Losses (identified by aggressive pricing or huge distance?)
+                     # For now, strict check on Grid orders.
+                     if price < min_price:
+                         logger.warning(f"[{symbol}] 🛡️ SAFETY: Blocked SELL {price} < Min {min_price:.2f} (Avg: {avg_entry:.2f})")
+                         return None
             
             # Place order
             order = await self.exchange.create_limit_order(symbol, side, amount, price)
@@ -591,7 +673,7 @@ class AsyncMultiSymbolBot:
     async def process_symbol(self, symbol):
         """
         Process trading logic for a single symbol.
-        Maintains grid around EMA (neutral price).
+        Supports LONG and SHORT modes.
         """
         try:
             price_data = self.last_prices.get(symbol, {})
@@ -605,16 +687,22 @@ class AsyncMultiSymbolBot:
             ema_l = self.ema_long.get(symbol, current_price)
             ema_s = self.ema_short.get(symbol, current_price)
             
+            # --- DETERMINE GRID MODE ---
+            # Default to 'long'.
+            # Future: Supervisor Agent updates this in config per symbol.
+            grid_mode = self.config.get('grid_mode', 'long').lower()
+            if hasattr(self, 'symbol_modes') and symbol in self.symbol_modes:
+                grid_mode = self.symbol_modes.get(symbol)
+                
+            is_long = (grid_mode == 'long')
+            
             # Neutral price default is long-term EMA
             neutral_price = ema_l
             
             # --- ADAPTIVE ANCHORING ---
-            # If trend is strong (ADX > 25), anchor to Short-Term EMA to catch shallow dips
             adx_val = self.adx.get(symbol, 0)
             if adx_val > 25:
                 neutral_price = ema_s
-                # if int(time.time()) % 60 < 5:
-                #    logger.debug(f"[{symbol}] Strong Trend (ADX {adx_val:.1f}) -> Using EMA-Short as Anchor")
             
             # Get config
             grid_settings = self.config.get('grid_settings', {})
@@ -626,169 +714,163 @@ class AsyncMultiSymbolBot:
             # --- SMART GRID MANAGER ---
             smart_conf = self.config.get('smart_grid', {})
             if smart_conf.get('enabled', False):
-                # --- RSI PANIC SELL ---
+                # --- RSI PANIC SELL/COVER ---
                 rsi = self.rsi.get(symbol, 50)
-                rsi_sell_thresh = smart_conf.get('rsi_sell_threshold', 90)
                 
-                if rsi > rsi_sell_thresh:
-                    if int(time.time()) % 60 < 5:
-                        logger.critical(f"[{symbol}] RSI {rsi:.1f} > {rsi_sell_thresh} -> PANIC SELL ACTIVATED! Dumping position.")
-                    
-                    # 1. Cancel all orders to free up locked funds
-                    await self.cancel_symbol_orders(symbol)
-                    
-                    # 2. Sell everything (Aggressive Limit Sell)
-                    free_amount = position.get('free', 0)
-                    
-                    if free_amount > 0:
-                        # Sell 2% below price to ensure fill (taker)
-                        sell_price = current_price * 0.98
-                        await self.place_limit_order(symbol, 'sell', free_amount, sell_price)
-                    
-                    return # STOP PROCESSING (No Buys)
+                # LONG Panic
+                if is_long:
+                    rsi_sell_thresh = smart_conf.get('rsi_sell_threshold', 90)
+                    if rsi > rsi_sell_thresh:
+                        if int(time.time()) % 60 < 5:
+                            logger.critical(f"[{symbol}] RSI {rsi:.1f} > {rsi_sell_thresh} -> PANIC SELL!")
+                        await self.cancel_symbol_orders(symbol)
+                        free_amount = position.get('free', 0)
+                        if free_amount > 0:
+                            # Sell 2% below price (taker)
+                            await self.place_limit_order(symbol, 'sell', free_amount, current_price * 0.98)
+                        return
+                
+                # SHORT Panic
+                else:
+                    rsi_buy_thresh = smart_conf.get('rsi_buy_threshold', 10)
+                    if rsi < rsi_buy_thresh:
+                        if int(time.time()) % 60 < 5:
+                            logger.critical(f"[{symbol}] RSI {rsi:.1f} < {rsi_buy_thresh} -> PANIC BUY (Short Cover)!")
+                        await self.cancel_symbol_orders(symbol)
+                        # We need to BUY to cover. Amount is negative for shorts in our logic?
+                        # Check fetch_all_positions logic: 
+                        # If futures: amount = -amount for shorts? No, I implemented `if side == 'short': amount = -amount`
+                        # So 'amount' is negative. 'free' is negative.
+                        # We need to buy abs(amount).
+                        pos_amt = position.get('amount', 0)
+                        if pos_amt < 0:
+                            buy_qty = abs(pos_amt)
+                            await self.place_limit_order(symbol, 'buy', buy_qty, current_price * 1.02)
+                        return
 
                 # 1. Volatility Adaptation (GARCH) + Trend Scaling (ADX)
                 garch = self.garch_vol.get(symbol, 0)
-                adx = self.adx.get(symbol, 0)
-                
                 if garch > 0:
                     vol_scale = smart_conf.get('volatility_scale', 1.0)
                     
-                    # --- NEW: Trend Adaptive Spacing ---
-                    # Revised for Scalping:
-                    # Ignore trends until they are EXTREME (ADX > 40)
-                    # Max expansion capped at 1.5x (was 2.0x) to allow closer orders
                     trend_scale = 1.0
-                    if adx > 40:
-                        trend_scale = 1.0 + min((adx - 40) / 40, 0.5) # Max 1.5x at ADX 80+
+                    if adx_val > 40:
+                        trend_scale = 1.0 + min((adx_val - 40) / 40, 0.5)
                     
                     vol_scale *= trend_scale
-                    # -----------------------------------
-
-                    # DYNAMIC SAFETY FACTOR
-                    # Low ADX (Chop) -> Covet 2.5 std devs (Tight)
-                    # High ADX (Trend) -> Cover 4.0 std devs (Safe)
+                    
                     safety_factor = 4.0
-                    if adx < 30:
-                        safety_factor = 2.5
-                    elif adx < 60:
-                        # Linear scale 2.5 -> 4.0
-                        safety_factor = 2.5 + 1.5 * ((adx - 30) / 30)
+                    if adx_val < 30: safety_factor = 2.5
+                    elif adx_val < 60: safety_factor = 2.5 + 1.5 * ((adx_val - 30) / 30)
                         
                     daily_vol = garch * 38
                     min_span = daily_vol * safety_factor * vol_scale
                     
-                    # --- OVERRIDE LOGIC ---
-                    # If aggressive_mode is ON, we trust the manual grid_span even if GARCH says it's unsafe.
-                    # We only widen if aggressive_mode is OFF.
                     aggressive = self.config.get('aggressive_mode', False)
-                    
                     if not aggressive:
-                         if min_span > grid_span:
-                             logger.debug(f"[{symbol}] Widening span: {grid_span:.2%} -> {min_span:.2%} (GARCH x{safety_factor:.1f})")
-                             grid_span = min_span
-                    else:
-                        # In aggressive mode, we might still want to KNOW what GARCH thinks, but we don't force it.
-                        # Maybe Log it?
-                        if int(time.time()) % 60 < 5:
-                             pass # logger.debug(f"[{symbol}] Aggressive Mode: Ignoring GARCH floor ({min_span:.2%}). Using {grid_span:.2%}")
+                        # Bidirectional GARCH Adjustment (Widen OR Tighten)
+                        # We blend the dynamic span with the config span for stability
+                        # 0.7 dynamic + 0.3 static default
+                        grid_span = (min_span * 0.7) + (grid_span * 0.3)
+                        
+                        # Hard clamps
+                        grid_span = max(0.005, min(grid_span, 0.10))               
                 
                 # 2. Trend Bias (RSI)
-                rsi = self.rsi.get(symbol, 50)
+                # Skew neutral price based on RSI
                 bias_strength = smart_conf.get('trend_bias_strength', 0.5)
-                
-                if rsi < 30: # Oversold -> Shift Neutral UP (more buys below)
+                if rsi < 30: # Oversold
                     skew = (30 - rsi) / 100 * bias_strength
+                    # If Long: buying cheaper is good, but skewing grid UP catches it earlier
+                    # If Short: oversold means we should be covering, or selling higher
                     neutral_price *= (1 + skew)
-                    if int(time.time()) % 60 < 5:
-                        logger.info(f"[{symbol}] RSI {rsi:.1f} Oversold -> Skewing grid UP")
-                elif rsi > 70: # Overbought -> Shift Neutral DOWN (more sells above)
+                elif rsi > 70: # Overbought
                     skew = (rsi - 70) / 100 * bias_strength
                     neutral_price *= (1 - skew)
-                    if int(time.time()) % 60 < 5:
-                        logger.info(f"[{symbol}] RSI {rsi:.1f} Overbought -> Skewing grid DOWN")
 
-            # --- REGIME FILTER (NEW) ---
+            # --- REGIME FILTER ---
             regime_conf = self.config.get('regime_filter', {})
-            allow_buys = True
-            allow_sells = True
+            allow_entries = True
+            allow_closes = True
             
             if regime_conf.get('enabled', False):
-                adx = self.adx.get(symbol, 0)
                 slope = self.ema_slope.get(symbol, 0)
                 adx_thresh = regime_conf.get('adx_threshold', 25)
                 slope_thresh = regime_conf.get('slope_threshold', 0.05)
                 
-                # Strong UPTREND (ADX > 25, Positive Slope) -> Block Shorts?
-                if adx > adx_thresh and slope > slope_thresh:
+                # Strong UPTREND
+                if adx_val > adx_thresh and slope > slope_thresh:
                     if regime_conf.get('top_trend_filter', True):
-                        allow_sells = False
-                        if int(time.time()) % 60 < 5:
-                            logger.info(f"[{symbol}] STRONG UPTREND (ADX:{adx:.1f} Slope:{slope:.2f}) -> Blocking Sells")
+                        if is_long:
+                             # Don't sell into uptrend (let it run)
+                             allow_closes = False
+                        else:
+                             # Don't short into uptrend
+                             allow_entries = False
                             
-                # Strong DOWNTREND (ADX > 25, Negative Slope) -> Block Longs?
-                elif adx > adx_thresh and slope < -slope_thresh:
+                # Strong DOWNTREND
+                elif adx_val > adx_thresh and slope < -slope_thresh:
                     if regime_conf.get('bottom_trend_filter', True):
-                        allow_buys = False
-                        if int(time.time()) % 60 < 5:
-                            logger.info(f"[{symbol}] STRONG DOWNTREND (ADX:{adx:.1f} Slope:{slope:.2f}) -> Blocking Buys")
-            # ---------------------------
+                        if is_long:
+                             # Don't buy (catch knife)
+                             allow_entries = False
+                        else:
+                             # Don't cover (let it drop)
+                             allow_closes = False
             
             # --- CHECK AUTO-UNSTUCK ---
             await self.auto_unstuck(symbol)
             
             # --- CALCULATE IDEAL GRID ---
-            buy_prices = self.calc_geometric_grid(neutral_price, n_orders, spacing_weight, grid_span)
+            # Long: Prices < Neutral
+            # Short: Prices > Neutral
+            grid_prices = self.calc_geometric_grid(neutral_price, n_orders, spacing_weight, grid_span, side=grid_mode)
             
             # Dynamic Capital Allocation
-            # Core Symbols (Hardcoded in config) -> High Tier
-            # Forager Symbols (Auto-discovered) -> Low Tier
             core_symbols = self.config.get('symbols', [])
-            if symbol in core_symbols:
-                target_wel = self.config.get('core_wallet_exposure', 0.35)
-            else:
-                target_wel = self.config.get('forager_wallet_exposure', 0.15)
+            base_wel = self.config.get('core_wallet_exposure', 0.35) if symbol in core_symbols \
+                    else self.config.get('forager_wallet_exposure', 0.15)
+            
+            # --- VOLATILITY-BASED SIZING (ATR/GARCH) ---
+            target_wel = base_wel
+            
+            if self.config.get('smart_grid', {}).get('rapid_volatility_sizing', False):
+                # Penalty for High Volatility (Safety First)
+                garch_current = self.garch_vol.get(symbol, 0)
+                vol_penalty = 1.0
                 
-            buy_qtys = self.calc_martingale_qty(
-                self.total_equity, 
-                n_orders,
-                qty_multiplier,
-                target_wel
-            )
+                if garch_current > 0.003:  # High vol (>0.3% per min)
+                    vol_penalty = 0.70  # Reduce size by 30%
+                elif garch_current > 0.002:  # Medium vol
+                    vol_penalty = 0.85  # Reduce size by 15%
+                
+                if vol_penalty < 1.0:
+                    target_wel = base_wel * vol_penalty
+                    if int(time.time()) % 300 < 5:
+                        logger.info(f"[{symbol}] Volatility Sizing: Penalty={vol_penalty:.2f} → WEL={target_wel:.1%}")
             
-            # --- GRID MAINTENANCE ---
-            existing_buy_orders = [o for o in orders if o['side'] == 'buy']
-            existing_buy_prices = set(o['price'] for o in existing_buy_orders)
+            start_qty_multiplier = qty_multiplier
+            buy_qtys = self.calc_martingale_qty(self.total_equity, n_orders, start_qty_multiplier, target_wel)
             
-            # Place missing buy orders
-            if allow_buys:
-                for i, (price, qty) in enumerate(zip(buy_prices, buy_qtys)):
-                    # Skip if order already exists near this price
-                    if any(abs(p - price) / price < 0.005 for p in existing_buy_prices):
-                        continue
-                    
-                    # Only place orders below current price
-                    if price >= current_price * 0.995:
-                        continue
-                    
-                    # Convert qty from USDT to base asset
-                    qty_base = qty / price
-                    
-            # Get detailed grid settings
+            # --- GRID MAINTENANCE (ENTRIES) ---
+            # Long: Entries are Buys
+            # Short: Entries are Sells
+            
+            entry_side = 'buy' if is_long else 'sell'
+            
+            existing_entry_orders = [o for o in orders if o['side'] == entry_side]
+            existing_entry_prices = set(o['price'] for o in existing_entry_orders)
+            
             drift_tol = grid_settings.get('drift_tolerance', 0.005)
-
-            # --- 1. IDENTIFY ORDERS TO KEEP VS CANCEL ---
-            orders_to_keep = []
-            matched_grid_indices = set() # Track which grid levels are satisfied
             
-            # Buys
-            if allow_buys:
-                existing_buy_orders = [o for o in orders if o['side'] == 'buy']
-                for order in existing_buy_orders:
-                    # Check if this order matches ANY target grid price
+            orders_to_keep = []
+            matched_grid_indices = set()
+            
+            if allow_entries:
+                for order in existing_entry_orders:
                     is_valid = False
-                    for i, target_price in enumerate(buy_prices):
-                        if i in matched_grid_indices: continue # This level already claimed
+                    for i, target_price in enumerate(grid_prices):
+                        if i in matched_grid_indices: continue
                         
                         if abs(order['price'] - target_price) / target_price < drift_tol:
                             is_valid = True
@@ -797,142 +879,180 @@ class AsyncMultiSymbolBot:
                             break
                     
                     if not is_valid:
-                        # This order is "orphaned" (too far from any target) -> Cancel it
+                        # Cancel extra entries
                         await self.cancel_order(symbol, order['id'])
-
-            # --- 2. PLACE MISSING ORDERS ---
-            if allow_buys:
-                for i, (price, qty) in enumerate(zip(buy_prices, buy_qtys)):
-                    if i in matched_grid_indices:
-                        continue # Already have a valid order for this level
+                
+                # Place missing entries
+                for i, (price, qty_usdt) in enumerate(zip(grid_prices, buy_qtys)):
+                    if i in matched_grid_indices: continue
                     
-                    # Place new order
-                    qty_base = qty / price
-                    await self.place_limit_order(symbol, 'buy', qty_base, price)
+                    # Logic Check:
+                    # Long: Price must be < Current * 0.995
+                    # Short: Price must be > Current * 1.005
+                    threshold = 0.995 if is_long else 1.005
+                    should_place = (price <= current_price * threshold) if is_long else (price >= current_price * threshold)
+                    
+                    if not should_place: continue
+                    
+                    qty_base = qty_usdt / price
+                    await self.place_limit_order(symbol, entry_side, qty_base, price)
+
+            # --- CLOSE ORDERS (EXITS) ---
+            # Long: Sells above Neutral
+            # Short: Buys below Neutral
             
-            # --- CLOSE ORDERS (Sells above neutral) ---
-            pos_amount = position.get('amount', 0)
-            if pos_amount > 0 and allow_sells:
-                # Calculate sell prices (mirror of buys, above neutral)
-                sell_prices = [neutral_price * (1 + (neutral_price - p) / neutral_price) for p in buy_prices[:3]]
+            pos_amt = position.get('amount', 0)
+            has_position = (pos_amt > 0) if is_long else (pos_amt < 0)
+            
+            if has_position and allow_closes:
+                # Calculate exit prices (Mirror the grid)
+                # Long: Neutral + (Neutral - BuyPrice)
+                # Short: Neutral - (SellPrice - Neutral) => 2*Neutral - SellPrice
+                # Formula is same: 2*Neutral - EntryPrice
+                exit_prices = [2 * neutral_price - p for p in grid_prices[:3]]
                 
-                existing_sell_orders = [o for o in orders if o['side'] == 'sell']
+                close_side = 'sell' if is_long else 'buy'
+                existing_close_orders = [o for o in orders if o['side'] == close_side]
                 
-                # --- 1. CLEANUP OLD SELLS ---
-                matched_sell_indices = set()
-                for order in existing_sell_orders:
+                matched_close_indices = set()
+                for order in existing_close_orders:
                     is_valid = False
-                    for i, target_price in enumerate(sell_prices):
-                         if i in matched_sell_indices: continue
-                         
+                    for i, target_price in enumerate(exit_prices):
+                         if i in matched_close_indices: continue
                          if abs(order['price'] - target_price) / target_price < drift_tol:
                              is_valid = True
-                             matched_sell_indices.add(i)
+                             matched_close_indices.add(i)
                              break
-                    
                     if not is_valid:
                         await self.cancel_order(symbol, order['id'])
-
+                
                 # --- TRAILING STOP LOGIC ---
-                trailing_conf = self.config.get('trailing_settings', {})
-                trailing_enabled = trailing_conf.get('entry_trailing_threshold_pct', 0) > 0 or \
-                                   trailing_conf.get('close_trailing_threshold_pct', 0) > 0 # Use any non-zero as enablement check
+                await self.process_trailing_stop(symbol, current_price, position, is_long, neutral_price)
                 
-                activation_pct = trailing_conf.get('close_trailing_threshold_pct', 0.02)
-                callback_pct = trailing_conf.get('close_trailing_retracement_pct', 0.005)
+                # Place missing closest orders (if not trailing)
+                # We assume process_trailing_stop handles pure exits if trailing activated
                 
-                current_value = position.get('value_usdt', 0)
-                # Calculate avg entry roughly (if not tracked, use naive estimate or rely on first read)
-                # Ideally we track avg_entry. For now, we assume if we have a position, we track PnL vs BreakEven
-                # Simplifying: We start trailing when Price > Neutral Price * (1 + activation)
-                # OR more accurately: Price > Avg Entry * (1 + activation)
-                
-                # Since we don't have robust avg_entry in 'positions' map (it comes from balance which sums amounts),
-                # we will use the 'neutral_price' (EMA) or just check simply if price is pumping relative to grid.
-                
-                # IMPROVEMENT: Use 'break_even_price' if exchange supports it, or estimate from recent trades.
-                # For this implementation, we will Trigger Trailing when Price > Last Price recorded + activation
-                
-                # Robust Logic:
-                avg_entry_price = position.get('avgEntryPrice', 0) 
-                # Note: ccxt balance fetch might not give avgEntryPrice. 
-                # If 0, fallback to neutral_price as baseline.
-                if avg_entry_price == 0:
-                    avg_entry_price = neutral_price
-                
-                pnl_pct = (current_price - avg_entry_price) / avg_entry_price
-                
-                # 1. CHECK ACTIVATION
-                if pnl_pct > activation_pct:
-                    # Update High Water Mark
-                    last_hwm = self.trailing_high_water_mark.get(symbol, 0)
-                    if current_price > last_hwm:
-                        self.trailing_high_water_mark[symbol] = current_price
-                        # Log new high
-                        if current_price > last_hwm * 1.005: 
-                             logger.info(f"[{symbol}] Trailing Profit New High: {current_price:.4f} (PnL: {pnl_pct:.2%})")
-                    
-                    # 2. CHECK TRIGGER (Retracement)
-                    hwm = self.trailing_high_water_mark.get(symbol, current_price)
-                    stop_price = hwm * (1 - callback_pct)
-                    
-                    if current_price < stop_price:
-                        logger.info(f"[{symbol}] 🛑 TRAILING STOP HIT! Price: {current_price:.4f} < Stop: {stop_price:.4f}")
-                        # SELL ALMOST EVERYTHING (Leave dust or sell 100%)
-                        sell_qty = free_amount 
-                        if sell_qty > 0:
-                            # Cancel limits first to free up locked amount? 
-                            # If we use 'free_amount', we only sell what's not in limit orders.
-                            # Better: Cancel ALL sells to free up full stack, then sell.
-                            await self.cancel_symbol_orders(symbol)
-                            
-                            # Re-fetch balance to be safe or just use known total
-                            # Fast path: just sell known pos amount
-                            total_pos = position.get('amount', 0)
-                            if total_pos > 0:
-                                await self.place_limit_order(symbol, 'sell', total_pos, current_price * 0.99) # Limit 'market' sell
-                                # RESET HWM
-                                self.trailing_high_water_mark[symbol] = 0
-                                return # Done for this tick
+                abs_free = abs(position.get('free', 0))
+                if abs_free > 0:
+                     # Simple logic: Distribute free amount to first few exit levels
+                     exit_qty_chunk = abs_free / max(len(exit_prices), 1)
+                     
+                     for i, price in enumerate(exit_prices):
+                         if i in matched_close_indices: continue
+                         
+                         # Check distance
+                         # Long: Exit > Current
+                         # Short: Exit < Current
+                         safe_to_place = (price > current_price * 1.005) if is_long else (price < current_price * 0.995)
+                         if not safe_to_place: continue
+                         
+                         await self.place_limit_order(symbol, close_side, exit_qty_chunk, price)
 
-                # If NOT trailing (or price not high enough), proceed to GRID logic
-                
-                # --- 2. PLACE MISSING SELLS ---
-                free_amount = position.get('free', 0)
-                if free_amount <= 0: return # Nothing to sell if not trailing
-                
-                sell_qty_chunk = free_amount / max(len(sell_prices), 1)
-                
-                for i, price in enumerate(sell_prices):
-                    if i in matched_sell_indices:
-                        continue
-                        
-                    if price <= current_price * 1.005:
-                        continue
-                    
-                    if sell_qty_chunk > 0:
-                        await self.place_limit_order(symbol, 'sell', sell_qty_chunk, price)
-            
-            # Log summary occasionally
+            # Log summary
             if int(time.time()) % 60 < 5:
                 we = position.get('wallet_exposure', 0)
-                adx = self.adx.get(symbol, 0)
-                slope = self.ema_slope.get(symbol, 0)
-                garch = self.garch_vol.get(symbol, 0) * 100 # Show as %
-                logger.info(f"[{symbol}] Price: {current_price:.2f} | ADX: {adx:.1f} | Slope: {slope:.3f}% | GARCH: {garch:.2f}% | WE: {we:.1%}")
-            
+                garch = self.garch_vol.get(symbol, 0) * 100
+                logger.info(f"[{symbol}] {grid_mode.upper()} | Price: {current_price:.2f} | WE: {we:.1%} | GARCH: {garch:.2f}%")
+
         except Exception as e:
             logger.error(f"Error processing {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    async def process_trailing_stop(self, symbol, current_price, position, is_long, neutral_price):
+        """Separate Trailing Stop Logic for clarity."""
+        trailing_conf = self.config.get('trailing_settings', {})
+        activation_pct = trailing_conf.get('close_trailing_threshold_pct', 0.02)
+        callback_pct = trailing_conf.get('close_trailing_retracement_pct', 0.005)
+        
+        # Estimate Entry logic
+        avg_entry = position.get('avgEntryPrice', neutral_price) # Fallback to Neutral
+        if avg_entry <= 0: avg_entry = neutral_price
+        
+        # PnL Calculation
+        if is_long:
+            pnl_pct = (current_price - avg_entry) / avg_entry
+        else:
+            pnl_pct = (avg_entry - current_price) / avg_entry
+            
+        if pnl_pct < activation_pct:
+            return # Not triggered
+            
+        # Update Water Mark
+        last_wm = self.trailing_high_water_mark.get(symbol, 0)
+        
+        # Init Water Mark if 0
+        if last_wm == 0:
+            last_wm = current_price
+            
+        new_record = False
+        if is_long:
+            if current_price > last_wm:
+                self.trailing_high_water_mark[symbol] = current_price
+                new_record = True
+        else:
+            if current_price < last_wm or last_wm == 0:
+                self.trailing_high_water_mark[symbol] = current_price
+                new_record = True
+                
+        if new_record and int(time.time()) % 60 < 5:
+             logger.info(f"[{symbol}] Trailing New Record: {current_price:.4f} (PnL: {pnl_pct:.2%})")
+            
+        # Check Stop
+        wm = self.trailing_high_water_mark.get(symbol, current_price)
+        stop_triggered = False
+        
+        if is_long:
+            stop_price = wm * (1 - callback_pct)
+            if current_price < stop_price: stop_triggered = True
+        else:
+            stop_price = wm * (1 + callback_pct)
+            if current_price > stop_price: stop_triggered = True
+            
+        if stop_triggered:
+            logger.info(f"[{symbol}] 🛑 TRAILING STOP HIT! Price: {current_price:.4f} / Stop: {stop_price:.4f}")
+            await self.cancel_symbol_orders(symbol)
+            
+            # Close position
+            abs_amount = abs(position.get('amount', 0))
+            if abs_amount > 0:
+                close_side = 'sell' if is_long else 'buy'
+                # Market close (Limit with tolerance)
+                close_price = current_price * 0.99 if is_long else current_price * 1.01
+                await self.place_limit_order(symbol, close_side, abs_amount, close_price)
+                
+                # Reset
+                self.trailing_high_water_mark[symbol] = 0
+
     
     async def hot_reload_config(self):
         """Hot-reload config if changed."""
         try:
             new_config = self.load_config()
             
+            # Change Detection: Only update if changed
+            if new_config == self.config:
+                return False
+
             old_syms = set(self.get_active_symbols())
-            self.config = new_config
-            new_syms = set(self.get_active_symbols())
             
+            # DEEP UPDATE: Update member variables that are cached
+            self.config = new_config
+            self.wallet_exposure_limit = self.config.get('wallet_exposure_limit', 1.0)
+            self.max_drawdown_pct = self.config.get('max_drawdown_pct', 0.15)
+            
+            # Update specific subsections if needed
+            if 'futures_settings' in self.config:
+                 self.leverage = self.config['futures_settings'].get('leverage', 1)
+            
+            # Hot-Reload State (Cost Basis)
+            if hasattr(self, 'state_manager'):
+                self.state_manager.reload()
+
+            # Log changes
+            logger.info(f"[Hot-Reload] Config & State updated. WEL: {self.wallet_exposure_limit}, Leverage: {self.leverage}")
+
+            new_syms = set(self.get_active_symbols())
             if old_syms != new_syms:
                 added = new_syms - old_syms
                 removed = old_syms - new_syms
@@ -942,6 +1062,7 @@ class AsyncMultiSymbolBot:
                     logger.info(f"[Hot-Reload] Removed: {removed}")
                 return True
             return False
+            
         except Exception as e:
             logger.error(f"Config reload error: {e}")
             return False
@@ -964,8 +1085,8 @@ class AsyncMultiSymbolBot:
                 now = time.time()
                 iteration += 1
                 
-                # Hot-reload config every 5 minutes
-                if now - self.last_config_reload > 300:
+                # Hot-reload config every 10 seconds (Responsive to Governor/User)
+                if now - self.last_config_reload > 10:
                     await self.hot_reload_config()
                     self.last_config_reload = now
                 

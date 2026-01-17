@@ -10,7 +10,7 @@
     "total_wallet_exposure_limit": 1.0,
     "max_drawdown_pct": 0.3,
     "futures_settings": {
-        "enabled": true,
+        "enabled": false,
         "leverage": 3,
         "margin_mode": "CROSSED",
         "shorting_enabled": true
@@ -23,6 +23,7 @@
     },
     "smart_grid": {
         "enabled": true,
+        "rapid_volatility_sizing": true,
         "volatility_scale": 0.8,
         "trend_bias_strength": 0.0,
         "atr_period": 14,

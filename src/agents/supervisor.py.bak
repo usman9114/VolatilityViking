@@ -1,0 +1,166 @@
+import asyncio
+import json
+import os
+from openai import OpenAI
+from src.agents.base_agent import BaseAgent, logger
+from src.agents.scout import ScoutAgent
+from src.agents.risk_agent import RiskAgent
+from src.agents.architect import ArchitectAgent
+from src.ai.utils import call_openai_with_retry
+
+class SupervisorAgent(BaseAgent):
+    """
+    The Supervisor: "The Boss".
+    Conducts meetings with other agents and makes high-level decisions.
+    """
+    def __init__(self):
+        super().__init__()
+        self.api_key = os.getenv('OPENAI_API_KEY')
+        if self.api_key:
+            self.client = OpenAI(api_key=self.api_key)
+        else:
+            logger.warning("No OpenAI API Key found for Supervisor.")
+            self.client = None
+            
+        self.scout = ScoutAgent()
+        self.risk = RiskAgent()
+        self.architect = ArchitectAgent()
+
+    def load_prompts(self):
+        try:
+            with open('prompts.json', 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load prompts.json: {e}")
+            return {}
+
+    async def conduct_meeting(self):
+        """
+        Runs the full agency loop.
+        """
+        logger.info(f"[{self.name}] Calling meeting to order...")
+        
+        # 1. Gather Intelligence
+        scout_report = await self.scout.run()
+        risk_report = await self.risk.run()
+        architect_report = await self.architect.run()
+        
+        # 2. Consult the Oracle (LLM)
+        if not self.client:
+            logger.error("Cannot proceed without OpenAI.")
+            return
+
+        current_config_summary = {
+            "active_symbols": self.config.get('symbols', []),
+            "grid_mode": self.config.get('grid_mode', 'long'),
+            "wallet_exposure_limit": self.config.get('wallet_exposure_limit', 1.0)
+        }
+
+        # Load Prompt Template
+        prompts = self.load_prompts()
+        cfg = prompts.get('agency_supervisor', {})
+        
+        system_prompt = cfg.get('system', "You are the Manager of a Crypto Trading Bot Agency.")
+        
+        user_template = cfg.get('user_template', "")
+        if not user_template:
+            # Fallback if file missing/malformed
+            user_prompt = f"""
+            Scout Report: {json.dumps(scout_report)}
+            Risk Report: {json.dumps(risk_report)}
+            Current Config: {json.dumps(current_config_summary)}
+            
+            Output JSON with 'actions' to update config.
+            """
+        else:
+            try:
+                user_prompt = user_template.format(
+                    scout_report=json.dumps(scout_report),
+                    risk_report=json.dumps(risk_report),
+                    architect_report=json.dumps(architect_report),
+                    current_config=json.dumps(current_config_summary)
+                )
+            except Exception as e:
+                logger.error(f"Prompt formatting error: {e}")
+                return
+
+        try:
+            response = await call_openai_with_retry(
+                self.client,
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+            )
+            
+            if not response: return
+            
+            # clean json
+            txt = response.replace('```json', '').replace('```', '').strip()
+            decision = json.loads(txt)
+            
+            logger.info(f"[{self.name}] Decision: {decision.get('rationale')}")
+            
+            # 3. Execute Decisions
+            actions = decision.get('actions', {})
+            await self.apply_decisions(actions)
+            
+            return decision
+            
+        except Exception as e:
+            logger.error(f"[{self.name}] Meeting Failed: {e}")
+            return None
+
+    async def apply_decisions(self, actions):
+        """Update self.config based on actions."""
+        modified = False
+        
+        # Symbol Mgmt
+        current_syms = set(self.config.get('symbols', []))
+        
+        to_add = set(actions.get('add_symbols', []))
+        to_remove = set(actions.get('remove_symbols', []))
+        
+        if to_add or to_remove:
+            new_syms = list((current_syms | to_add) - to_remove)
+            self.config['symbols'] = new_syms
+            logger.info(f"Updated Symbols: {new_syms}")
+            modified = True
+            
+        # Mode
+        new_mode = actions.get('set_grid_mode')
+        if new_mode and new_mode in ['long', 'short']:
+            if self.config.get('grid_mode') != new_mode:
+                self.config['grid_mode'] = new_mode
+                logger.info(f"Switched Grid Mode: {new_mode}")
+                modified = True
+        
+        # Risk
+        new_wel = actions.get('set_wallet_exposure')
+        if new_wel is not None:
+             self.config['wallet_exposure_limit'] = float(new_wel)
+             logger.info(f"Updated Wallet Exposure: {new_wel}")
+             modified = True
+        
+        # Grid Span (Architect)
+        new_span = actions.get('update_grid_span')
+        if new_span is not None:
+             # Deep update for smart_grid
+             if 'smart_grid' not in self.config: self.config['smart_grid'] = {}
+             self.config['smart_grid']['grid_span'] = float(new_span)
+             logger.info(f"Updated Grid Span: {new_span}")
+             modified = True
+             
+        if modified:
+            self.save_config(self.config)
+
+    async def run(self):
+        return await self.conduct_meeting()
+
+if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv('profiles/usman/.env')
+    boss = SupervisorAgent()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(boss.run())

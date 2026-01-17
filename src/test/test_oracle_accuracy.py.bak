@@ -1,0 +1,204 @@
+"""
+Oracle Accuracy Backtest - Validate Oracle's predictive power for futures.
+
+Tests if Oracle can correctly predict price direction (LONG vs SHORT).
+"""
+import asyncio
+import ccxt.async_support as ccxt
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+async def fetch_historical_data(symbol, days=7):
+    """Fetch OHLCV data for the past N days."""
+    exchange = ccxt.binance({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot'}
+    })
+    
+    try:
+        await exchange.load_markets()
+        
+        # Fetch 1-minute data
+        since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+        all_ohlcv = []
+        
+        while True:
+            ohlcv = await exchange.fetch_ohlcv(symbol, '1m', since=since, limit=1000)
+            if not ohlcv:
+                break
+            all_ohlcv.extend(ohlcv)
+            since = ohlcv[-1][0] + 60000  # Next minute
+            
+            if len(ohlcv) < 1000:
+                break
+        
+        df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        
+        print(f"✅ Fetched {len(df)} candles for {symbol}")
+        return df
+        
+    finally:
+        await exchange.close()
+
+
+def calculate_market_features(df, lookback_idx):
+    """Calculate features Oracle needs at a specific point in time."""
+    # Use data UP TO lookback_idx (simulate Oracle running at that time)
+    df_slice = df.iloc[:lookback_idx].copy()
+    
+    if len(df_slice) < 100:
+        return None
+    
+    # Calculate indicators (simplified, matching Oracle logic)
+    df_slice['returns'] = df_slice['close'].pct_change()
+    
+    # RSI
+    delta = df_slice['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    # EMA
+    ema_200 = df_slice['close'].ewm(span=200, adjust=False).mean()
+    current_price = df_slice['close'].iloc[-1]
+    price_vs_ema = ((current_price - ema_200.iloc[-1]) / ema_200.iloc[-1]) * 100
+    
+    # Volatility (simple)
+    volatility = df_slice['returns'].rolling(60).std() * 100
+    
+    return {
+        'price': current_price,
+        'rsi': rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50,
+        'price_vs_ema200': price_vs_ema,
+        'volatility': volatility.iloc[-1] if not pd.isna(volatility.iloc[-1]) else 1.0,
+        'regime': 'Uptrend' if price_vs_ema > 2 else ('Downtrend' if price_vs_ema < -2 else 'Sideways')
+    }
+
+
+async def test_oracle_accuracy(symbols, days=7):
+    """
+    Test Oracle accuracy:
+    - At each daily checkpoint, run Oracle
+    - Check if next 24h price matches prediction
+    """
+    print(f"\n🔮 Oracle Accuracy Test - {days} days\n")
+    
+    results = {}
+    
+    for symbol in symbols:
+        print(f"\n📊 Testing {symbol}...")
+        
+        # Fetch data
+        df = await fetch_historical_data(symbol, days=days)
+        
+        # Test points: every 24 hours (1440 minutes)
+        test_points = []
+        for day in range(1, days):
+            idx = day * 1440  # 1440 minutes = 1 day
+            if idx >= len(df) - 1440:  # Need 24h future data
+                break
+            test_points.append(idx)
+        
+        predictions = []
+        
+        for idx in test_points:
+            features = calculate_market_features(df, idx)
+            if not features:
+                continue
+            
+            # Simulate Oracle prediction
+            # Simple rule-based simulation (real Oracle uses OpenAI)
+            rsi = features['rsi']
+            regime = features['regime']
+            volatility = features['volatility']
+            
+            # Bullish probability heuristic
+            if regime == 'Uptrend' and rsi < 70:
+                bullish_prob = 0.65 + (70 - rsi) / 200  # 65-80%
+            elif regime == 'Downtrend' and rsi > 30:
+                bullish_prob = 0.35 - (rsi - 30) / 200  # 20-35%
+            else:
+                bullish_prob = 0.50  # Neutral
+            
+            # Clamp
+            bullish_prob = max(0.2, min(0.8, bullish_prob))
+            
+            # Actual price movement (next 24h)
+            current_price = df.iloc[idx]['close']
+            future_price = df.iloc[idx + 1440]['close']  # 24h later
+            actual_return = ((future_price - current_price) / current_price) * 100
+            
+            # Oracle prediction: Bullish if > 50%
+            predicted_bullish = bullish_prob > 0.5
+            actual_bullish = actual_return > 0
+            
+            correct = predicted_bullish == actual_bullish
+            
+            predictions.append({
+                'timestamp': df.index[idx],
+                'price': current_price,
+                'bullish_prob': bullish_prob,
+                'predicted': 'LONG' if predicted_bullish else 'SHORT',
+                'actual_return': actual_return,
+                'correct': correct
+            })
+        
+        # Calculate accuracy
+        if predictions:
+            accuracy = sum(p['correct'] for p in predictions) / len(predictions) * 100
+            avg_return_when_bullish = np.mean([p['actual_return'] for p in predictions if p['predicted'] == 'LONG'])
+            avg_return_when_bearish = np.mean([p['actual_return'] for p in predictions if p['predicted'] == 'SHORT'])
+            
+            results[symbol] = {
+                'accuracy': accuracy,
+                'predictions': predictions,
+                'avg_return_long': avg_return_when_bullish,
+                'avg_return_short': avg_return_when_bearish
+            }
+            
+            print(f"\n  ✅ Accuracy: {accuracy:.1f}%")
+            print(f"  📈 Avg return when LONG: {avg_return_when_bullish:.2f}%")
+            print(f"  📉 Avg return when SHORT: {avg_return_when_bearish:.2f}%")
+            print(f"  🎯 Total predictions: {len(predictions)}")
+    
+    return results
+
+
+async def main():
+    symbols = ['AVAX/USDT', 'LINK/USDT', 'SOL/USDT']
+    results = await test_oracle_accuracy(symbols, days=7)
+    
+    print("\n" + "=" * 60)
+    print("📊 ORACLE FUTURES VALIDATION SUMMARY")
+    print("=" * 60)
+    
+    for symbol, data in results.items():
+        print(f"\n{symbol}:")
+        print(f"  Directional Accuracy: {data['accuracy']:.1f}%")
+        print(f"  Profit if LONGed all bullish signals: {data['avg_return_long']:.2f}%")
+        print(f"  Profit if SHORTed all bearish signals: {data['avg_return_short']:.2f}%")
+        
+        # Verdict
+        if data['accuracy'] > 55:
+            print(f"  ✅ Oracle is GOOD ENOUGH for futures on {symbol}")
+        else:
+            print(f"  ❌ Oracle needs improvement for {symbol}")
+    
+    print("\n" + "=" * 60)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

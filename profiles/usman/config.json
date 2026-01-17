@@ -1,21 +1,28 @@
 {
     "symbols": [
         "ETH/USDT",
-        "SOL/USDT",
         "AVAX/USDT",
         "LINK/USDT",
+        "SOL/USDT",
         "DASH/USDT"
     ],
     "live_mode": true,
-    "aggressive_mode": false,
-    "wallet_exposure_limit": 1.0,
-    "core_wallet_exposure": 1.0,
+    "banker": {
+        "enabled": true,
+        "margin_safety_threshold": 0.35,
+        "topup_amount": 300.0,
+        "min_spot_balance": 10.0
+    },
+    "grid_mode": "long",
+    "aggressive_mode": true,
+    "wallet_exposure_limit": 0.5,
+    "core_wallet_exposure": 0.2,
     "forager_wallet_exposure": 0.0,
     "total_wallet_exposure_limit": 1.0,
     "max_drawdown_pct": 0.3,
     "futures_settings": {
-        "enabled": true,
-        "leverage": 3,
+        "enabled": false,
+        "leverage": 2,
         "margin_mode": "CROSSED",
         "shorting_enabled": true
     },
@@ -33,11 +40,13 @@
     },
     "smart_grid": {
         "enabled": true,
-        "volatility_scale": 0.8,
+        "rapid_volatility_sizing": true,
+        "volatility_scale": 1.0,
         "trend_bias_strength": 0.0,
         "atr_period": 14,
         "rsi_period": 14,
-        "rsi_sell_threshold": 90
+        "rsi_sell_threshold": 90,
+        "grid_span": 0.08
     },
     "regime_filter": {
         "enabled": true,
@@ -63,10 +72,10 @@
         "reselect_interval_minutes": 30
     },
     "grid_settings": {
-        "grid_span": 0.006,
+        "grid_span": 0.25,
         "grid_spacing_weight": 1.2,
         "qty_step_multiplier": 1.25,
-        "max_orders": 5,
+        "max_orders": 8,
         "drift_tolerance": 0.002
     },
     "unstuck_settings": {
@@ -76,14 +85,34 @@
         "unstuck_price_distance_threshold": 0.2
     },
     "trailing_settings": {
-        "close_trailing_threshold_pct": 0.03,
+        "close_trailing_threshold_pct": 0.025,
         "close_trailing_retracement_pct": 0.01,
         "close_trailing_qty_pct": 1.0,
-        "entry_trailing_threshold_pct": 0.01,
+        "entry_trailing_threshold_pct": 0.008,
         "entry_trailing_retracement_pct": 0.003
     },
     "ema_settings": {
         "long_term_span": 1000,
         "short_term_span": 100
+    },
+    "model_preferences": {
+        "governor": [
+            "o3-pro",
+            "o1-preview",
+            "gpt-5-chat-latest",
+            "gpt-4o",
+            "gpt-4-turbo"
+        ],
+        "scout": [
+            "gpt-5-turbo",
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-3.5-turbo"
+        ],
+        "architect": [
+            "o3-mini",
+            "o1-mini",
+            "gpt-4o"
+        ]
     }
 }
