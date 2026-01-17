@@ -1,0 +1,89 @@
+{
+    "symbols": [
+        "ETH/USDT",
+        "SOL/USDT",
+        "AVAX/USDT",
+        "LINK/USDT",
+        "DASH/USDT"
+    ],
+    "live_mode": true,
+    "aggressive_mode": false,
+    "wallet_exposure_limit": 1.0,
+    "core_wallet_exposure": 1.0,
+    "forager_wallet_exposure": 0.0,
+    "total_wallet_exposure_limit": 1.0,
+    "max_drawdown_pct": 0.3,
+    "futures_settings": {
+        "enabled": true,
+        "leverage": 3,
+        "margin_mode": "CROSSED",
+        "shorting_enabled": true
+    },
+    "liquidity_manager": {
+        "enabled": true,
+        "asset": "USDT",
+        "min_transfer_amount": 5.0,
+        "keep_buffer_usdt": 20.0
+    },
+    "ml_settings": {
+        "enabled": true,
+        "lookback_days": 365,
+        "auto_retrain_hours": 24,
+        "min_accuracy_threshold": 0.55
+    },
+    "smart_grid": {
+        "enabled": true,
+        "volatility_scale": 0.8,
+        "trend_bias_strength": 0.0,
+        "atr_period": 14,
+        "rsi_period": 14,
+        "rsi_sell_threshold": 90
+    },
+    "regime_filter": {
+        "enabled": true,
+        "adx_threshold": 30,
+        "slope_threshold": 0.02,
+        "top_trend_filter": true,
+        "bottom_trend_filter": true
+    },
+    "forager": {
+        "enabled": false,
+        "approved_symbols": [
+            "IMX/USDT",
+            "LINK/USDT",
+            "DASH/USDT",
+            "AVAX/USDT",
+            "FET/USDT",
+            "ARB/USDT"
+        ],
+        "max_positions": 4,
+        "volume_drop_pct": 0.25,
+        "volatility_lookback_minutes": 60,
+        "volume_lookback_minutes": 60,
+        "reselect_interval_minutes": 30
+    },
+    "grid_settings": {
+        "grid_span": 0.006,
+        "grid_spacing_weight": 1.2,
+        "qty_step_multiplier": 1.25,
+        "max_orders": 5,
+        "drift_tolerance": 0.002
+    },
+    "unstuck_settings": {
+        "unstuck_threshold": 0.8,
+        "unstuck_close_pct": 0.1,
+        "unstuck_loss_allowance_pct": 0.02,
+        "unstuck_price_distance_threshold": 0.2
+    },
+    "trailing_settings": {
+        "close_trailing_threshold_pct": 0.03,
+        "close_trailing_retracement_pct": 0.01,
+        "close_trailing_qty_pct": 1.0,
+        "entry_trailing_threshold_pct": 0.01,
+        "entry_trailing_retracement_pct": 0.003
+    },
+    "ema_settings": {
+        "long_term_span": 1000,
+        "short_term_span": 100
+    }
+}

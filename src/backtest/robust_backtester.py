@@ -196,10 +196,9 @@ class RobustBacktester:
             if ts.minute % 5 == 0:
                 if last_rebalance_ts != ts:
                     # Sync with Live Bot: Anchor is EMA Long (default)
-                    # Row should have 'ema_l' from _calculate_indicators
                     anchor_price = row.get('ema_l', curr_price)
                     
-                    self._rebalance_grid(row, equity, anchor_price)
+                    self._rebalance_grid(row, equity, anchor_price, ts)
                     last_rebalance_ts = ts
                     
         return self._generate_report()
@@ -374,7 +373,7 @@ class RobustBacktester:
                      })
                      self.orders = []
                 
-    def _rebalance_grid(self, row, total_equity, center_price):
+    def _rebalance_grid(self, row, total_equity, center_price, ts):
         # Clear existing BUYS only? 
         # Typically we cancel old grid buys and replace
         self.orders = []
@@ -532,10 +531,16 @@ class RobustBacktester:
                      self.orders.append({'side': 'buy', 'price': order['price'], 'qty': order['qty_base']})
             
         # Short Grid (If enabled) used inverted prices (above)
-        if self.allow_shorts and allow_shorts:
+        if allow_shorts:
              ideal_shorts = RecursiveGrid.calc_recursive_grid(center_price, total_equity, grid_params, side='short')
-             for order in ideal_shorts:
-                 self.orders.append({'side': 'sell', 'price': order['price'], 'qty': order['qty_base']})
+             if ideal_shorts:
+                 if self.allow_shorts:
+                     for order in ideal_shorts:
+                         self.orders.append({'side': 'sell', 'price': order['price'], 'qty': order['qty_base']})
+                 else:
+                     # AI BLOCKED SHORT
+                     if row.get('rsi', 50) > 80: # Just log the egregious ones to save space
+                         print(f"[{ts}] 🛡️ AI GUARDRAIL: Blocked {len(ideal_shorts)} Short Orders (RSI={row.get('rsi',0):.1f})")
 
     def _generate_report(self):
         if not self.equity_history:

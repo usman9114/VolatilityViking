@@ -3,56 +3,45 @@ import sys
 import os
 import pandas as pd
 from dotenv import load_dotenv
-import mlflow
-import datetime
-
-# load_dotenv() - Moved to main()
-
 def run_pipeline(config):
     symbol = config.get('symbol', 'ETH/USDT')
     timeframe = config.get('timeframe', '4h')
     
     print(f"--- Starting Pipeline for {symbol} ({timeframe}) [Meta Model] ---")
     
-    # MLflow Parent Run
-    run_name = f"MetaModel_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # Use pre-processed data
+    feat_path = "data/processed/train_dataset.parquet"
     
-    with mlflow.start_run(run_name=run_name) as parent_run:
-        mlflow.log_params(config) # Log CLI args
-        
-        # Use pre-processed data
-        feat_path = "data/processed/train_dataset.parquet"
-        
-        # Load Price Data for Backtester
-        df_price = pd.read_parquet(feat_path)
-        
-        # Train Model
-        print("4. Training Meta Model (Price + News)...")
-        from src.models.metamodel import MetamodelTrainer
-        from src.backtest.backtester import Backtester
-        
-        print(f"   Using prepared data from {feat_path}")
-        
-        # Optimized Hyperparams are hardcoded in MetamodelTrainer, but we pass seq_len=96
-        trainer = MetamodelTrainer(
-            data_path=feat_path, 
-            gas_path=None, 
-            news_emb_path=None,
-            seq_len=96 
-        )
-        
-        results = trainer.walk_forward_train(start_year=2018) 
-        
-        # Report and Backtest using Smart Logic
-        print("5. Generating Report...")
-        bt = Backtester(results, df_price)
-        metrics = bt.calculate_metrics()
-        
-        print("\n=== Training Complete ===")
-        print(f"Symbol: {symbol}")
-        print(f"Final Equity (from $10k): ${metrics['strategy_equity'].iloc[-1]:.2f}")
-        
-        return metrics
+    # Load Price Data for Backtester
+    df_price = pd.read_parquet(feat_path)
+    
+    # Train Model
+    print("4. Training Meta Model (Price + News)...")
+    from src.models.metamodel import MetamodelTrainer
+    from src.backtest.backtester import Backtester
+    
+    print(f"   Using prepared data from {feat_path}")
+    
+    # Optimized Hyperparams are hardcoded in MetamodelTrainer, but we pass seq_len=96
+    trainer = MetamodelTrainer(
+        data_path=feat_path, 
+        gas_path=None, 
+        news_emb_path=None,
+        seq_len=96 
+    )
+    
+    results = trainer.walk_forward_train(start_year=2018) 
+    
+    # Report and Backtest using Smart Logic
+    print("5. Generating Report...")
+    bt = Backtester(results, df_price)
+    metrics = bt.calculate_metrics()
+    
+    print("\n=== Training Complete ===")
+    print(f"Symbol: {symbol}")
+    print(f"Final Equity (from $10k): ${metrics['strategy_equity'].iloc[-1]:.2f}")
+    
+    return metrics
 
 def main():
     parser = argparse.ArgumentParser(description="ETH-AI Meta Trader")
@@ -63,11 +52,23 @@ def main():
     parser.add_argument('--config', type=str, default='config.json', help='Path to strategy config file (required for live mode)')
     parser.add_argument('--async-mode', action='store_true', dest='async_mode', help='Use async runner (Passivbot style - faster)')
     parser.add_argument('--env-file', type=str, default='.env', help='Path to environment file (default: .env)')
+    parser.add_argument('--profile', type=str, help='Run as specific user profile (e.g. usman, rizwan)')
     
     args = parser.parse_args()
 
+    # Handle Profile Logic (User Request)
+    env_path = args.env_file
+    if args.profile:
+        # Check profiles/USER/.env
+        profile_env = f"profiles/{args.profile}/.env"
+        if os.path.exists(profile_env):
+            env_path = profile_env
+            print(f"👤 PROFILE ACTIVE: {args.profile.upper()} (Loaded {env_path})")
+        else:
+            parser.error(f"Profile '{args.profile}' not found at {profile_env}")
+            
     # Load environment variables
-    load_dotenv(args.env_file, override=True)
+    load_dotenv(env_path, override=True)
     
     # Handle dashboard mode
     if hasattr(args, 'mode') and args.mode == 'dashboard':
@@ -97,7 +98,8 @@ def main():
         import asyncio
         from src.live.async_runner import main_async
         
-        asyncio.run(main_async(args.config))
+        profile_name = args.profile if args.profile else "default"
+        asyncio.run(main_async(args.config, profile_name))
 
 if __name__ == "__main__":
     main()

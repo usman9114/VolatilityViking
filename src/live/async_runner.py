@@ -13,20 +13,27 @@ from dotenv import load_dotenv
 import pandas as pd
 import numpy as np
 
-# Setup logging to both console and file
-os.makedirs('logs', exist_ok=True)
-log_filename = f"logs/async_bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler(log_filename),
-        logging.StreamHandler()
-    ]
-)
+# Setup logging with profile support
+def setup_logging(profile_name="default"):
+    os.makedirs('logs', exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_filename = f"logs/{profile_name}_{timestamp}.log"
+    
+    logging.getLogger().handlers = []
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[
+            logging.FileHandler(log_filename),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    logger.info(f"Log file: {log_filename}")
+    return logger
+
 logger = logging.getLogger(__name__)
-logger.info(f"Log file: {log_filename}")
 
 
 class AsyncMultiSymbolBot:
@@ -1074,6 +1081,16 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='config.json')
+    parser.add_argument('--profile', default='default')
     args = parser.parse_args()
+    
+    # Setup logging with profile name
+    logger = setup_logging(args.profile)
+    
+    # Load profile .env
+    env_path = f"profiles/{args.profile}/.env"
+    if os.path.exists(env_path):
+        logger.info(f"Loading env from {env_path}")
+        load_dotenv(env_path, override=True)
     
     asyncio.run(main_async(args.config))

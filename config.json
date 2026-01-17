@@ -7,12 +7,29 @@
     "aggressive_mode": false,
     "wallet_exposure_limit": 1.0,
     "core_wallet_exposure": 1.0,
-    "forager_wallet_exposure": 0.20,
+    "forager_wallet_exposure": 0.2,
     "total_wallet_exposure_limit": 1.5,
     "max_drawdown_pct": 0.3,
+    "futures_settings": {
+        "enabled": true,
+        "leverage": 5,
+        "margin_mode": "ISOLATED",
+        "shorting_enabled": true
+    },
+    "liquidity_manager": {
+        "enabled": true,
+        "min_transfer_amount": 10.0,
+        "keep_buffer_usdt": 50.0
+    },
+    "ml_settings": {
+        "enabled": true,
+        "lookback_days": 365,
+        "auto_retrain_hours": 24,
+        "min_accuracy_threshold": 0.55
+    },
     "smart_grid": {
         "enabled": true,
-        "volatility_scale": 0.80,
+        "volatility_scale": 0.8,
         "trend_bias_strength": 0.0,
         "atr_period": 14,
         "rsi_period": 14,
@@ -28,8 +45,14 @@
     "forager": {
         "enabled": true,
         "approved_symbols": [
+            "FET/USDT",
+            "AVAX/USDT",
+            "SOL/USDT",
+            "XMR/USDT",
             "LINK/USDT",
-            "AVAX/USDT"
+            "ETH/USDT",
+            "DASH/USDT",
+            "IMX/USDT"
         ],
         "max_positions": 4,
         "volume_drop_pct": 0.25,
