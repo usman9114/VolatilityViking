@@ -31,3 +31,8 @@ eth-bot_v0.0.1.zip
 
 # Debug logs
 debug_output.txt
+
+# Test coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
