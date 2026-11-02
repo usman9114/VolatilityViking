@@ -50,3 +50,15 @@ Model: sonnet · Depends: S1.1 · Worktree: no (only touch `vv/sim/`, `tests/sim
 
 ## Reply (≤120 words)
 status · test line · modelling simplifications S1.4 must know
+
+## Result
+Status: done. `pytest -q tests/sim`: 27 passed; `ruff check vv tests/sim` clean; full `pytest -q`: 166 passed, 1 xfailed (pre-existing). Not committed.
+
+Modelling notes for S1.4 (full list in the `vv/sim/fake_exchange.py` docstring):
+- Bar index = bar **open** time. At virtual time t the newest visible bar is t-1m; an order placed at t first meets bar t. Replay loop: `advance_to(t)`, snapshot, decide, place.
+- No partial fills, no queue position, no price improvement (fills at limit even on gaps). Fees in quote; taker fills at next bar open +/- slippage and snapped to tick against the trader.
+- Non-post-only = IOC-limit: if the slipped open is beyond the limit (buy above / sell below) it expires (see `ex.expired`). Flatten sells need a far-below limit price.
+- `fill_haircut` applies to maker fills only; each eligible order is re-rolled every bar, so it delays fills rather than dropping them.
+- `client_id` is never reusable (even after fill/cancel). Rejections raise `OrderRejected(reason=...)`.
+- Fill records are stamped with the closing time of their bar; extra key `liquidity` (maker/taker). Extras: `ex.marks()`, `ex.equity()`, `ex.cash_reserved`.
+- Bar frames are normalised to ns resolution (pandas 3 default differs).
