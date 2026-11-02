@@ -73,6 +73,88 @@ def test_pipeline_smoke_on_synthetic_parquet(tmp_path):
     df.to_parquet(tmp_path / "klines" / "TESTUSDT_1m.parquet")
     out = tmp_path / "out.md"
     g0.main(["--symbols", "TESTUSDT", "--out", str(out),
-             "--data-dir", str(tmp_path), "--reps", "20"])
+             "--data-dir", str(tmp_path), "--reps", "20",
+             "--exclude-listing-days", "5"])
     text = out.read_text()
     assert "Verdict" in text and ("FAIL" in text or "PASS" in text)
+    assert "Final (both)" in text and "Robust" in text
+
+
+# --------------------------------------------------------------------------
+# G0-robust additions (WP-S0D)
+# --------------------------------------------------------------------------
+def _ar1_series(phi: float, n: int, seed: int) -> pd.Series:
+    idx = pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC")
+    return pd.Series(_ar1(phi, n, seed), index=idx)
+
+
+def test_winsorise_caps_spike_and_moves_vr_back():
+    clean = _ar1_series(-0.3, 20_000, seed=4)
+    spiked = clean.copy()
+    sigma = 1.4826 * float(np.median(np.abs(clean - clean.median())))
+    for pos, sign in [(3_000, 1), (9_000, -1), (15_000, 1)]:
+        spiked.iloc[pos] = sign * 20 * sigma
+    wins, n_capped = g0.winsorise_monthly(spiked, k=5.0)
+
+    assert n_capped >= 3
+    assert wins.abs().max() < 6 * sigma          # spike capped near 5 sigma
+    assert wins.iloc[3_000] > 0 and wins.iloc[9_000] < 0  # sign preserved
+    vr = lambda s: g0.variance_ratio(s.values, 12).vr
+    assert abs(vr(wins) - vr(clean)) < abs(vr(spiked) - vr(clean))
+    # input untouched, non-spike bars mostly unchanged
+    assert spiked.abs().max() > 15 * sigma
+    assert (wins != spiked).sum() == n_capped
+
+
+def test_winsorise_scale_is_per_calendar_month():
+    idx = pd.date_range("2024-01-01", "2024-02-29 23:55", freq="5min", tz="UTC")
+    rng = np.random.default_rng(1)
+    vol = np.where(idx.month == 1, 1e-4, 1e-3)
+    r = pd.Series(rng.standard_normal(len(idx)) * vol, index=idx)
+    r.iloc[100] = 1e-2   # 100 sigma in a quiet January, only 10 sigma-ish in February scale
+    wins, _ = g0.winsorise_monthly(r, k=5.0)
+    assert wins.iloc[100] < 1e-3                       # capped by January's own scale
+    assert wins[idx.month == 2].abs().max() > 3e-3     # February not capped at January's scale
+
+
+def test_exclude_window_removes_exactly_those_bars():
+    idx = pd.date_range("2025-10-01", "2025-10-20", freq="5min", tz="UTC", inclusive="left")
+    s = pd.Series(np.arange(len(idx), dtype=float), index=idx)
+    start, end = pd.Timestamp("2025-10-10", tz="UTC"), pd.Timestamp("2025-10-12", tz="UTC")
+    out = g0.exclude_windows(s, [(start, end)])
+    assert len(s) - len(out) == 2 * 288
+    assert not ((out.index >= start) & (out.index < end)).any()
+    kept = s[(s.index < start) | (s.index >= end)]
+    pd.testing.assert_series_equal(out, kept)
+    assert pd.Timestamp("2025-10-09 23:55", tz="UTC") in out.index
+    assert end in out.index and start not in out.index
+
+
+def test_parse_window_and_listing_drop():
+    w = g0.parse_windows([["2025-10-10", "2025-10-12"]])
+    assert w == [(pd.Timestamp("2025-10-10", tz="UTC"), pd.Timestamp("2025-10-12", tz="UTC"))]
+    idx = pd.date_range("2024-01-01", periods=60 * 24 * 40, freq="1min", tz="UTC")
+    df = pd.DataFrame({"close": 1.0}, index=idx)
+    out = g0.drop_listing_days(df, 30)
+    assert out.index[0] == pd.Timestamp("2024-01-31", tz="UTC")
+    assert len(g0.drop_listing_days(df, 0)) == len(df)
+
+
+def test_holm_matches_hand_computation():
+    p = [0.01, 0.04, 0.03, 0.005]
+    # sorted 0.005,0.01,0.03,0.04 -> x4,x3,x2,x1 = 0.02,0.03,0.06,0.04 -> cummax 0.02,0.03,0.06,0.06
+    adj = g0.holm_adjust(p)
+    np.testing.assert_allclose(adj, [0.03, 0.06, 0.06, 0.02])
+    np.testing.assert_allclose(g0.holm_adjust([0.5, 0.9]), [1.0, 1.0])  # 0.5*2=1.0; 0.9*1 -> cummax 1.0
+    np.testing.assert_allclose(g0.holm_adjust([0.2]), [0.2])
+
+
+def test_recentred_ci_always_contains_point_estimate():
+    for seed in range(8):
+        rng = np.random.default_rng(seed)
+        n = int(rng.integers(150, 600))                     # short sample
+        r = rng.standard_t(2.5, n) * 1e-3 * rng.choice([1, 1, 8], n)  # heavy tails
+        qs = [2, 12, 48]
+        ci = g0.vr_bootstrap_ci(r, qs, mean_block=20, reps=200, seed=seed)
+        vrs = g0._vr_point(r, qs)
+        assert np.all(ci[:, 0] <= vrs) and np.all(vrs <= ci[:, 1])
