@@ -1,0 +1,7 @@
+-r requirements-live.in
+pytest
+pytest-asyncio
+pytest-cov
+ruff
+graphifyy==0.9.101
+scipy

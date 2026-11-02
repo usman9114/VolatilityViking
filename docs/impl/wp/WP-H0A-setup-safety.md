@@ -39,3 +39,15 @@ All four commands run. Lint errors and test failures are reported, not hidden. `
 
 ## Reply (≤120 words)
 status · files moved/created (counts) · lint result · test pass/fail line · graph node count · anything you couldn't do mechanically
+
+## Result
+- Status: done, with one test left failing (see below). Not committed.
+- Env: `.venv` (Python 3.12) bootstrapped. `requirements-live.{in,txt}` and `requirements-dev.{in,txt}` compiled with hashes. `requirements.txt` moved to `legacy/requirements-legacy.txt`.
+- Tooling: `scripts/bootstrap.sh`, `Makefile` (bootstrap/test/lint/graph), `pyproject.toml` (ruff E9/F63/F7/F82).
+- Safety: `config.json` `live_mode` false. `.gitignore` anchored. `docs/backtest_results.png` removed. README performance section removed and rework notice added. Those edits were picked up by commit bf7faa9 made outside this WP.
+- Quarantine: 34 files `git mv`'d to `legacy/` (live 5, backtest 5, features 1, utils 2, root optimizer + config_opt 2, tools 2, notebooks 1, tests 3, scripts 13). `src/features/indicators.py` left in place because nothing imports it. `scripts/fetch_klines.py` did not exist when this WP ran; WP-H0B added it later.
+- `pytest.ini` `norecursedirs` added. `async_runner.py` `run_portfolio_manager_async` deleted. `main.py` has no mlflow, `run_pipeline` or `train` mode. Help text updated to live/dashboard. `pandas` and `datetime` imports in `main.py` are now unused and were left.
+- Fixture: `tests/test_smart_grid.py` now sets `adx`, `ema_slope`, `garch_vol` as dicts, matching `__init__`. The brief's example used scalars, but production calls `.get()` on them.
+- Test failing: `test_smart_grid.py::test_atr_widens_grid`. It expects an ATR-based span of 0.20. `process_symbol` only widens the span inside `if garch > 0` and uses GARCH vol, so the test is stale. Fixing it needs a design decision, so it was left failing after one fixture attempt.
+- Verify: `make lint` passes. `make test` gives 36 passed, 1 failed. `python main.py --help` works. `make graph` gives 769 nodes, 1366 edges.
+- Open: `Dockerfile` still references `requirements.txt` (left alone per brief). `legacy/` files are not re-linted.

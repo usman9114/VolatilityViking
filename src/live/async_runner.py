@@ -1036,25 +1036,6 @@ class AsyncMultiSymbolBot:
             logger.info("Bot stopped.")
 
 
-async def run_portfolio_manager_async(config_path, interval_hours=1, stop_event=None):
-    """Run portfolio manager in async context."""
-    from src.live.portfolio_manager import PortfolioManager
-    
-    pm = PortfolioManager()
-    
-    # Skip initial run - assume config is up to date
-    logger.info("[Portfolio Manager] Will run first update in 1 hour (config assumed up-to-date)")
-    
-    try:
-        # Periodic updates
-        while stop_event is None or not stop_event.is_set():
-            await asyncio.sleep(interval_hours * 3600)
-            logger.info("[Portfolio Manager] Running scheduled update...")
-            pm.run_auto_update(config_path=config_path)
-    except asyncio.CancelledError:
-        logger.info("[Portfolio Manager] Stopped.")
-
-
 async def main_async(config_path='config.json'):
     """
     Main entry point - runs bot only.
