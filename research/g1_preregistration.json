@@ -1,0 +1,44 @@
+{
+  "_note": "Pre-registered before any G1 result was seen (2026-11-03). Do not edit after results exist; add a new versioned file instead.",
+  "version": 1,
+  "decision_interval_minutes": 15,
+  "start_cash": 10000,
+  "fees": {"maker": 0.00075, "taker": 0.001, "taker_slippage_bps": 10},
+  "fill_haircut": 1.0,
+  "risk": {
+    "total_exposure_cap": 0.38,
+    "per_symbol_cap": 0.15,
+    "portfolio_halt_dd": 0.15,
+    "symbol_halt_dd": 0.25
+  },
+  "fixed_grid": {
+    "levels": 5,
+    "qty_multiplier": 1.25,
+    "tp_fee_multiple": 2.5,
+    "sigma_horizon_minutes": 60,
+    "maker_fee": 0.00075
+  },
+  "trials": {
+    "min_step": [0.0075, 0.01, 0.015, 0.02, 0.03],
+    "spacing_sigmas": [1.5, 3.0]
+  },
+  "splits": [
+    {"name": "2019-2020", "start": "2019-01-01", "end": "2021-01-01", "role": "in_sample"},
+    {"name": "2021", "start": "2021-01-01", "end": "2022-01-01", "role": "in_sample"},
+    {"name": "2022", "start": "2022-01-01", "end": "2023-01-01", "role": "in_sample"},
+    {"name": "2023", "start": "2023-01-01", "end": "2024-01-01", "role": "in_sample"},
+    {"name": "2024", "start": "2024-01-01", "end": "2025-01-01", "role": "out_of_sample"},
+    {"name": "2025-2026", "start": "2025-01-01", "end": "2026-11-01", "role": "out_of_sample"}
+  ],
+  "selection": "Pick the single trial with the highest median net Sharpe across in-sample splits. Report every trial; trial count = 10.",
+  "stress": ["fees x2 (maker 0.0015, taker 0.002)", "fill_haircut 0.7"],
+  "shadow_control": ["ETHUSDT"],
+  "gate_g1": {
+    "net_capture_over_fees_min": 2.0,
+    "oos_sharpe_ci_lower_gt": 0.0,
+    "oos_sharpe_ci": "stationary block bootstrap of daily returns, mean block 10 days, 2000 reps, at fees x2",
+    "positive_splits": "net return > 0 in a majority of all 6 splits, and 2022 must be among them",
+    "max_drawdown_max": 0.15,
+    "shadow_rule": "If ETH (zero-capital control) passes, flag the fill model as possibly too generous and rerun with fill_haircut 0.7 before trusting any pass."
+  }
+}
