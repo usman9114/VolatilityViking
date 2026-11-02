@@ -59,3 +59,15 @@ Use the S1.2a functions as they are (`features.py`, `pricing.py`, `regime.py`) a
 
 ## Reply (≤120 words)
 status · test line · anything S1.4 (replay) must handle
+
+## Result
+Status: done (not committed). `pytest -q tests/core`: 119 passed; `ruff check vv tests/core` clean; `make test`: green.
+
+Deviations and notes for S1.4:
+- `reconcile(desired, open_orders, tolerance_ticks=2, *, markets)`: `markets` is a required keyword (tick size, filters and bid are needed for tolerance, rounding and guards).
+- `flatten_intents(portfolio, markets, symbols, now)`. Limit is bid*(1-0.01), re-emitted every decide while free qty > 0, with a per-minute epoch bucket so the id is new each retry. A resting vv sell with matching price/qty is kept instead.
+- Client ids: `orders.order_id(symbol, side, level, price, qty, epoch_bucket)`; a resized TP gets a new id. Ladder epoch bucket = anchor index on a geometric grid of one step. Residual risk: an identical order re-placed after an earlier identical one was cancelled/filled (same bucket) reuses its id and would be rejected; S1.4 should count such rejections.
+- Ladder budget is net of holdings and non-vv resting buys, not of our own resting buys (they are the target ladder). Subtracting them would cancel the ladder once it fills the budget. The cumulative global/per-symbol cap counts all resting buys that survive the cycle.
+- Marks are mid prices; a position with no market is marked at cost.
+- Cold/no-feature symbols: resting vv buys are cancelled, sells left alone. Blocked symbols are flattened each cycle.
+- Fills change qty/anchor, so ladder orders may be replaced after each fill (qty outside the 10% tolerance); expect churn in replay.

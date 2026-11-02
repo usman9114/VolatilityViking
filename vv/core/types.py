@@ -65,6 +65,8 @@ class HaltState:
     active: bool = False
     reason: str | None = None
     since: datetime | None = None
+    # Symbols tripped by the per-symbol drawdown limit. Latched like ``active``.
+    blocked_symbols: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -150,3 +152,11 @@ class CancelOrder:
 
 
 OrderIntent = PlaceOrder | CancelOrder
+
+
+@dataclass(frozen=True)
+class Decision:
+    """Result of ``decide``: intents to execute and the halt state the caller must persist."""
+
+    intents: tuple[OrderIntent, ...]
+    halt: HaltState
