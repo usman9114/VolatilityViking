@@ -16,11 +16,17 @@ class GridParams(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     spacing_sigmas: float = Field(gt=0, le=20)
+    min_step: float = Field(ge=0.001, le=0.2)  # fraction; floor on grid step
+    sigma_horizon_minutes: int = Field(ge=5, le=1440)  # horizon over which sigma_h is measured
     levels: int = Field(ge=1, le=50)
     qty_multiplier: float = Field(gt=0, le=10)
     tp_fee_multiple: float = Field(default=2.5, gt=0, le=100)
     maker_fee: float = Field(ge=0, le=0.01)  # fraction per fill, e.g. 0.001
     vol_scalar: dict[str, float] = Field(default_factory=dict)  # symbol -> scalar, absent == 1.0
+
+    @property
+    def round_trip_fee(self) -> float:
+        return 2 * self.maker_fee
 
     @field_validator("vol_scalar")
     @classmethod

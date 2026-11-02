@@ -124,7 +124,10 @@ RISK = dict(
     portfolio_halt_dd=0.15,
     symbol_halt_dd=0.25,
 )
-GRID = dict(spacing_sigmas=1.0, levels=4, qty_multiplier=1.2, maker_fee=0.001)
+GRID = dict(
+    spacing_sigmas=1.0, min_step=0.005, sigma_horizon_minutes=60,
+    levels=4, qty_multiplier=1.2, maker_fee=0.001,
+)
 
 
 def test_risk_params_valid():
