@@ -199,6 +199,9 @@ def analyse_symbol(symbol: str, df: pd.DataFrame, reps: int, seed: int) -> dict:
     return out
 
 
+RECENT_FROM = 2024
+
+
 def evaluate_g0(results: list[dict]) -> tuple[bool, list[tuple[str, bool, str]]]:
     """Apply the G0 rule literally. Returns (passed, [(check, ok, detail)])."""
     checks = []
@@ -221,6 +224,27 @@ def evaluate_g0(results: list[dict]) -> tuple[bool, list[tuple[str, bool, str]]]
     return all(ok for _, ok, _ in checks), checks
 
 
+def symbol_verdicts(results: list[dict]) -> list[dict]:
+    """Per-symbol G0 verdict: every check for that symbol must hold.
+
+    Also reports how many of the most recent years (>= RECENT_FROM) show
+    significant mean reversion at 1h, as information (not part of the rule).
+    """
+    _, checks = evaluate_g0(results)
+    out = []
+    for res in results:
+        sym = res["symbol"]
+        mine = [(c, ok, d) for c, ok, d in checks if c.startswith(sym + " ")]
+        recent = {y: rows for y, rows in res["vr_year"].items() if int(y) >= RECENT_FROM}
+        recent_ok = sum(1 for rows in recent.values()
+                        for rw in rows if rw["horizon"] == "1h" and rw["sig_below"])
+        out.append(dict(symbol=sym, passed=all(ok for _, ok, _ in mine),
+                        failed=[c[len(sym) + 1:] for c, ok, _ in mine if not ok],
+                        details={c[len(sym) + 1:]: d for c, _, d in mine},
+                        recent=f"{recent_ok} of {len(recent)}"))
+    return out
+
+
 # --------------------------------------------------------------------------
 # Report
 # --------------------------------------------------------------------------
@@ -236,7 +260,7 @@ def _vr_table(rows: list[dict]) -> list[str]:
 
 def render_report(results: list[dict], reps: int, seed: int) -> str:
     passed, checks = evaluate_g0(results)
-    L = ["# G0 results: does ETH/BTC mean-revert at grid horizons?", ""]
+    L = ["# G0 results: which coins mean-revert at grid horizons?", ""]
     for res in results:
         L.append(f"- {res['symbol']}: {res['start']:%Y-%m-%d} to {res['end']:%Y-%m-%d}, "
                  f"{res['nbars']:,} 1m bars ({res['gaps5']} empty 5m bins forward-filled).")
@@ -245,7 +269,20 @@ def render_report(results: list[dict], reps: int, seed: int) -> str:
           "Year rows need at least "
           f"{MIN_YEAR_DAYS} days of data.", ""]
 
-    L += ["## Verdict", ""]
+    L += ["## Verdict per coin", "",
+          "Each coin is gated on its own. Only coins that pass go on to the G1 replay.", "",
+          f"| Coin | G0 | Pooled 1h | Pooled 4h | Years 1h | Years 4h | 1h since {RECENT_FROM} | Median 4h range |",
+          "|---|---|---|---|---|---|---|---|"]
+    for v in symbol_verdicts(results):
+        d = v["details"]
+        get = lambda key: next((val for k, val in d.items() if k.startswith(key)), "")
+        L.append(f"| {v['symbol']} | {'**PASS**' if v['passed'] else 'fail'} | "
+                 f"{get('pooled 1h')} | {get('pooled 4h')} | {get('1h:')} | {get('4h:')} | "
+                 f"{v['recent']} | {get('median 4h')} |")
+    L += ["", f"With {len(results)} coins tested, expect occasional false passes from chance; "
+          "the majority-of-years rule limits this, and G1 (replay with fees) is the real test.", ""]
+
+    L += ["## Overall (all coins together)", ""]
     if passed:
         L.append("**PASS.** Every G0 check below holds.")
     else:
@@ -255,7 +292,7 @@ def render_report(results: list[dict], reps: int, seed: int) -> str:
     for c, ok, d in checks:
         L.append(f"| {c} | {'pass' if ok else 'fail'} | {d} |")
     L += ["", "Rule applied literally: PASS only if VR<1 with the CI excluding 1 at 1h and 4h "
-          "for both symbols, in a majority of years, and the median 4h range exceeds "
+          "for every symbol, in a majority of years, and the median 4h range exceeds "
           f"{RANGE_THRESHOLD:.3%}.", ""]
 
     for res in results:
