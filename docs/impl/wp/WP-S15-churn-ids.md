@@ -30,3 +30,12 @@ Navigate with `graphify explain "decide"` and `graphify explain "order_id"`. The
 
 ## Reply (≤120 words)
 status · test line · smoke places/decision before vs after · duplicate rejections after
+
+## Result
+Status: done (not committed). `pytest -q tests/core tests/sim`: 175 passed; `ruff check vv tests` clean. Files: `vv/core/decide.py`, `vv/core/orders.py`, `tests/core/test_decide.py`, `tests/core/test_orders.py`.
+
+- Hysteresis: flat + regime OK + own resting buys whose top rung is within [bid(1-1.5s), bid(1-0.5s)] -> desired = the resting orders (same ids), so reconcile is a no-op. Held positions unchanged.
+- Ids: `order_id(..., decision_minute=0)` hashes the decision minute (`int(ts.timestamp() // 60)`); decide passes it for buys and the TP sell. `risk.py` flatten ids already pass the minute as the epoch argument and were left alone (out of scope), so they are unchanged.
+- Test note: the brief's "bid drifts up 0.3 step per cycle over 5 cycles" cannot stay in the band if cumulative (the band is +-0.5 step, and 0.6 step must replace). The test uses a 0.3-step sawtooth (up, back, up, back).
+- Smoke (BTC+SOL, selected trial, base): places/decision 44726/5760 = 7.8 before, 25099/5760 = 4.4 after (cancels 44455 -> 24769). `duplicate_client_id` 1767 -> 0 (no rejections at all).
+- Churn is down about 44%, not to near zero. Remaining churn is presumably the held-position path (re-anchor whenever bid < avg_entry, TP following the ask) and moves larger than half a step (step 0.0075 here) in 15 min. Not investigated.

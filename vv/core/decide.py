@@ -26,6 +26,14 @@ def _marks(snapshot: Snapshot) -> dict[str, float]:
     return marks
 
 
+def _hysteresis_keeps(ours_buys: list, bid: float, step: float) -> bool:
+    """True when the resting flat-ladder's top rung still sits 0.5..1.5 steps below the bid."""
+    if not ours_buys:
+        return False
+    top = max(o.price for o in ours_buys)
+    return bid * (1.0 - 1.5 * step) <= top <= bid * (1.0 - 0.5 * step)
+
+
 def decide(snapshot: Snapshot, params: GridParams, risk: RiskParams) -> Decision:
     """Map a portfolio-wide snapshot to order intents plus the halt state to persist.
 
@@ -60,6 +68,7 @@ def decide(snapshot: Snapshot, params: GridParams, risk: RiskParams) -> Decision
     sigmas = {s: snapshot.features[s].sigma_h * params.vol_scalar.get(s, 1.0) for s in warm}
     budgets = symbol_budgets(equity, sigmas, risk)
 
+    minute = int(snapshot.ts.timestamp() // 60)
     desired: list[PlaceOrder] = []
     for s in warm:
         m, feat = markets[s], snapshot.features[s]
@@ -69,7 +78,18 @@ def decide(snapshot: Snapshot, params: GridParams, risk: RiskParams) -> Decision
         avg_entry = pos.avg_entry if held else None
         step = step_size(feat, params, s)
 
-        if buys_allowed(feat):
+        ours_buys = [
+            o
+            for o in pf.open_orders
+            if o.symbol == s and o.side == "buy" and is_ours(o.client_id) and o.remaining > 0
+        ]
+        if buys_allowed(feat) and not held and _hysteresis_keeps(ours_buys, m.bid, step):
+            # Flat and the resting ladder is still well placed: desire exactly what rests so
+            # reconcile keeps it all (no re-anchoring to every tick of the bid).
+            desired.extend(
+                PlaceOrder(s, "buy", o.price, o.remaining, o.client_id) for o in ours_buys
+            )
+        elif buys_allowed(feat):
             # The ladder is the *target* resting set, so our own resting buys are part of it
             # and must not be subtracted here (that would cancel the ladder as it fills the
             # budget). Holdings and foreign resting buys do consume budget; the final
@@ -90,7 +110,7 @@ def decide(snapshot: Snapshot, params: GridParams, risk: RiskParams) -> Decision
             for level, (p, q) in enumerate(zip(prices, qtys, strict=True)):
                 q = flt.round_qty(q, flt_.step_size)
                 if q > 0:
-                    cid = order_id(s, "buy", level, p, q, bucket)
+                    cid = order_id(s, "buy", level, p, q, bucket, minute)
                     desired.append(PlaceOrder(s, "buy", p, q, cid))
 
         if held and pos is not None:
@@ -105,7 +125,7 @@ def decide(snapshot: Snapshot, params: GridParams, risk: RiskParams) -> Decision
             )
             if free > 0:
                 bucket = anchor_bucket(pos.avg_entry, step)
-                cid = order_id(s, "sell", 0, tp, free, bucket)
+                cid = order_id(s, "sell", 0, tp, free, bucket, minute)
                 desired.append(PlaceOrder(s, "sell", tp, free, cid))
 
     # Orders in scope for reconcile: everything of warm symbols; for symbols we cannot

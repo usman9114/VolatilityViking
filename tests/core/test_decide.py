@@ -1,4 +1,5 @@
 import random
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -334,3 +335,80 @@ def test_expired_flatten_is_retried_every_decide_with_new_id():
     ids2 = {p.client_id for p in _places(d2, "sell")}
     assert ids1 and ids2 and ids1.isdisjoint(ids2)
     assert all(p.price == pytest.approx(65.0 * 0.99, abs=0.01) for p in _places(d2, "sell"))
+
+
+# --- S1.5: ladder hysteresis and per-minute ids ---------------------------------------
+
+STEP = 0.015  # 1.5 * sigma 0.01, above GRID.min_step
+
+
+def _run_cycles(bids):
+    """Feed successive flat snapshots (one per decision minute), applying each decision."""
+    resting: list[OpenOrder] = []
+    out = []
+    for k, bid in enumerate(bids):
+        base = _snap(bids={"A/USDT": bid}, orders=resting, symbols=["A/USDT"])
+        ts = datetime(2026, 1, 1, 0, k, tzinfo=timezone.utc)
+        snap = replace(base, ts=ts)
+        d = decide(snap, GRID, RISK)
+        out.append(d)
+        resting = _apply(snap, d)
+    return out
+
+
+def test_s15_flat_bid_drifting_within_half_step_causes_no_churn():
+    # 0.3 step up, back, up, back: always inside the +-0.5 step hysteresis band
+    bids = [100.0 * (1 + 0.3 * STEP * (k % 2)) for k in range(5)]
+    ds = _run_cycles(bids)
+    assert len(_places(ds[0], "buy")) == GRID.levels
+    for d in ds[1:]:
+        assert d.intents == ()
+
+
+def test_s15_bid_rising_0p6_step_replaces_the_ladder():
+    ds = _run_cycles([100.0, 100.0 * (1 + 0.6 * STEP)])
+    assert len(_cancels(ds[1])) == GRID.levels
+    assert len(_places(ds[1], "buy")) == GRID.levels
+
+
+def test_s15_bid_falling_0p6_step_replaces_the_ladder():
+    ds = _run_cycles([100.0, 100.0 * (1 - 0.6 * STEP)])
+    assert len(_cancels(ds[1])) == GRID.levels
+    assert len(_places(ds[1], "buy")) == GRID.levels
+
+
+def test_s15_position_keeps_anchor_behaviour_not_hysteresis():
+    # held: anchor = min(bid, avg_entry); a bid far above entry changes nothing, a bid
+    # below entry re-anchors the ladder
+    pos = {"A/USDT": Position("A/USDT", 1.0, 100.0, 0.0)}
+    snap = _snap(positions=pos, cash=900.0, symbols=["A/USDT"])
+    resting = [o for o in _apply(snap, decide(snap, GRID, RISK))]
+    up = _snap(bids={"A/USDT": 103.0}, positions=pos, cash=900.0, orders=resting,
+               symbols=["A/USDT"])
+    d_up = decide(up, GRID, RISK)  # only the take-profit follows the ask; buys untouched
+    assert not _places(d_up, "buy")
+    assert all(c.client_id not in {o.client_id for o in resting if o.side == "buy"}
+               for c in _cancels(d_up))
+    down = _snap(bids={"A/USDT": 97.0}, positions=pos, cash=900.0, orders=resting,
+                 symbols=["A/USDT"])
+    assert _cancels(decide(down, GRID, RISK))
+
+
+def test_s15_same_order_gets_different_id_in_a_different_minute():
+    snap = _snap(symbols=["A/USDT"])
+    later = replace(snap, ts=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc))
+    same_minute = replace(snap, ts=datetime(2026, 1, 1, 0, 0, 30, tzinfo=timezone.utc))
+    a, b, c = (decide(s, GRID, RISK) for s in (snap, later, same_minute))
+    ids = lambda d: [p.client_id for p in _places(d, "buy")]  # noqa: E731
+    assert [(p.price, p.qty) for p in _places(a)] == [(p.price, p.qty) for p in _places(b)]
+    assert set(ids(a)).isdisjoint(ids(b))
+    assert ids(a) == ids(c)
+
+
+def test_s15_sell_id_also_changes_with_the_minute():
+    pos = {"A/USDT": Position("A/USDT", 1.0, 100.0, 0.0)}
+    snap = _snap(positions=pos, cash=900.0, symbols=["A/USDT"])
+    later = replace(snap, ts=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc))
+    (s1,) = _places(decide(snap, GRID, RISK), "sell")
+    (s2,) = _places(decide(later, GRID, RISK), "sell")
+    assert (s1.price, s1.qty) == (s2.price, s2.qty) and s1.client_id != s2.client_id

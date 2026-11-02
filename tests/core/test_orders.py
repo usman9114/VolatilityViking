@@ -127,6 +127,12 @@ def test_order_id_unique_per_price_qty_and_deterministic():
     assert base.startswith("vv-") and len(base) <= 36
 
 
+def test_order_id_changes_with_decision_minute_only():
+    a = order_id(SYM, "buy", 1, 99.0, 1.0, 5, 1000)
+    assert a == order_id(SYM, "buy", 1, 99.0, 1.0, 5, 1000)
+    assert a != order_id(SYM, "buy", 1, 99.0, 1.0, 5, 1001)
+
+
 def test_identical_order_is_kept_never_cancelled_and_replaced():
     cid = order_id(SYM, "buy", 1, 99.0, 1.0, 5)
     o = _open("buy", 99.0, 1.0, cid)

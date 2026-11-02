@@ -41,18 +41,27 @@ def anchor_bucket(anchor: float, step: float) -> int:
 
 
 def order_id(
-    symbol: str, side: Side, level: int, price: float, qty: float, epoch_bucket: int
+    symbol: str,
+    side: Side,
+    level: int,
+    price: float,
+    qty: float,
+    epoch_bucket: int,
+    decision_minute: int = 0,
 ) -> str:
     """Client id unique per placement yet deterministic: ``vv-`` + 32 hex (35 chars).
 
     Exchanges never let a client id be reused, so the id covers the *rounded* price and qty
     as well as symbol/side/level/epoch: an order that is resized or repriced gets a new id,
     while an identical order always hashes to the same one (stable across restarts).
-    Pass price and qty already rounded to the exchange filters.
+    ``decision_minute`` (epoch minute of the deciding snapshot) is hashed in too, so an
+    identical order re-placed in a later minute (after a cancel or fill) gets a fresh id;
+    within one minute the id is unchanged. Kept orders keep their old id because reconcile
+    matches on price and qty. Pass price and qty already rounded to the exchange filters.
     """
     if side not in ("buy", "sell"):
         raise ValueError(f"invalid side: {side!r}")
-    key = f"{symbol}|{side}|{level}|{price!r}|{qty!r}|{epoch_bucket}".encode()
+    key = f"{symbol}|{side}|{level}|{price!r}|{qty!r}|{epoch_bucket}|{decision_minute}".encode()
     return PREFIX + hashlib.blake2b(key, digest_size=16).hexdigest()
 
 
