@@ -1,0 +1,24 @@
+{
+  "_note": "G1 v2, pre-registered 2026-11-02 BEFORE any G1 v1 result was seen (v1 full run still in progress). Strategy variants inspired by Binance's Spot Grid and Rebalancing bots. Do not edit after results exist.",
+  "version": 2,
+  "inherits": "research/g1_preregistration.json (fees, risk caps, halts, splits, stress, shadow control, gate, decision interval)",
+  "universe": ["BTCUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "LINKUSDT"],
+  "variants": {
+    "A_dca_tp": {
+      "description": "Current production strategy (DCA ladder + single take-profit at cost basis). Results taken from G1 v1.",
+      "trials": "as in v1 (10)"
+    },
+    "B_paired_grid": {
+      "description": "Classic Binance-style spot grid: geometric levels in a fixed range around the anchor; each level is an independent buy->sell pair (buy at level i, sell same qty at level i+1, then re-arm the buy). Equal quote notional per level. Budget per symbol = inverse-vol share of total cap, capped at per_symbol_cap. No trailing. Re-centre only when the symbol is fully flat and price has stayed outside the range for 24h. Regime gate (4h EMA200) blocks new buys; existing sells stay.",
+      "fixed": {"levels": 10},
+      "trials": {"step": [0.01, 0.02, 0.03]}
+    },
+    "C_rebalance": {
+      "description": "Binance-style threshold rebalancing: target crypto weight = total_exposure_cap (0.38) split inverse-vol across the universe, rest USDT. When a coin's weight deviates from target by more than band x target, place a post-only limit (buy at bid-1tick / sell at ask+1tick) sized to restore target. No regime gate.",
+      "trials": {"band": [0.1, 0.2, 0.4]}
+    }
+  },
+  "selection": "Within each variant, pick the trial with the highest median net Sharpe across in-sample splits. Total trials across variants = 16; report all and state the count.",
+  "comparison": "Report each variant's selected trial side by side on out-of-sample splits, plus equal-weight buy-and-hold at the same average exposure. A variant is deployable only if it passes the inherited G1 gate on its own.",
+  "shadow_control": "ETHUSDT run for the selected trial of every variant."
+}
