@@ -9,12 +9,12 @@ __pycache__
 *.log
 
 # Project specific
-data/
-logs/
-logs-test/
-mlruns/
-models/
-data-test/
+/data/
+/logs/
+/logs-test/
+/mlruns/
+/models/
+/data-test/
 passivbot_repo/
 .gemini/
 .vscode/

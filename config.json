@@ -3,7 +3,7 @@
         "ETH/USDT",
         "SOL/USDT"
     ],
-    "live_mode": true,
+    "live_mode": false,
     "aggressive_mode": false,
     "wallet_exposure_limit": 1.0,
     "core_wallet_exposure": 1.0,
