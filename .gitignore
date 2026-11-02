@@ -36,3 +36,6 @@ debug_output.txt
 .coverage
 .coverage.*
 htmlcov/
+
+# graphify code graph (rebuild with: graphify update .)
+graphify-out/
