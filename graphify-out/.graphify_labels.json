@@ -1,0 +1,21 @@
+{
+  "0": "Entry Points & Ops Scripts",
+  "2": "Binance Grid Bot & Verifiers",
+  "3": "Portfolio Manager & News",
+  "4": "GARCH Backtest & Optimizer",
+  "7": "Portfolio Manager Internals",
+  "8": "Data Processing & Features",
+  "9": "Trading Scenario Tests",
+  "10": "Grid Calculation Tests",
+  "11": "Technical Indicators",
+  "12": "Smart Grid / Forager Tests",
+  "13": "Legacy Trader & Prediction DB",
+  "14": "Martingale Sizing Tests",
+  "15": "Live Logic Tests",
+  "16": "Monitor Tool",
+  "17": "Smart Backtester",
+  "18": "News Embeddings",
+  "19": "BinanceBot Internals",
+  "21": "VM Setup Script",
+  "22": "Cloud Migration Script"
+}

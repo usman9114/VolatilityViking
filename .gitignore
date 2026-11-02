@@ -31,3 +31,9 @@ eth-bot_v0.0.1.zip
 
 # Debug logs
 debug_output.txt
+
+# graphify: keep the graph, ignore machine-local cache/state
+graphify-out/cache/
+graphify-out/manifest.json
+graphify-out/.graphify_root
+graphify-out/memory/
