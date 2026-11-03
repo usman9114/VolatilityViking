@@ -51,3 +51,13 @@ Implement the two Binance-inspired variants exactly as pre-registered in `resear
 
 ## Reply (≤120 words)
 status · test line · smoke runtime · projected full runtime · design choices the prereg left open
+
+## Result
+Status: done (not committed). `pytest -q tests`: 280 passed, 1 xfailed; `ruff check vv research tests` clean. Smoke (`python -m research.g1v2_run --smoke --processes 2 --out <scratch>`): 24s wall. Projected full v2 (5 symbols + ETH, 16 trials, no haircut reruns): ~2.7 CPU-h, ~0.7 h on 4 cores (smoke cost per symbol-day: A 0.033s, B 0.040s, C 0.018s).
+
+Files: `vv/core/variants/{__init__,paired_grid,rebalance}.py`, `vv/core/types.py` (`Snapshot.fills_since_last`, default `()`), `vv/sim/replay.py` (additive `strategy=` / `strategy_state=`; golden test pins the default path), `research/g1v2_run.py`, `tests/core/test_variants.py`, `tests/sim/test_replay_variants.py`.
+
+Design choices the prereg left open:
+- B: `GridState` is per symbol; `decide_paired` takes and returns a `{symbol: GridState}` mapping. `levels=10` means 10 buy->sell pairs (11 lines), anchor = middle line = mid price when the symbol first warms up. State also carries `held_qty` and `orders` (client id -> side, level) so fills map to levels. Quote per level = `symbol_budgets` / levels, then the production global cap clips buys (`_apply_global_cap` imported from `decide`). A sell sits at the level above but is lifted to ask + 1 tick if price already passed it. A re-centre cycle only cancels; orders return next cycle. Fills are absorbed even on stale snapshots. Cold symbols cancel buys, keep sells.
+- C: stateless. Target = `symbol_budgets` share (so `per_symbol_cap` applies); still requires warm features (sigma). A resting order is kept while it points the right way and its implied target, `(qty held +- remaining) * limit`, is within band/2 of the current target.
+- Replay: for B/C the `GridParams` passed to `run_replay` is only a carrier of `sigma_horizon_minutes` (60, from the v1 fixed_grid).

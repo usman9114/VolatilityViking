@@ -34,7 +34,7 @@ from __future__ import annotations
 import multiprocessing
 import time
 from collections import Counter
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -47,6 +47,7 @@ from vv.core.features import compute_features
 from vv.core.params import GridParams, RiskParams
 from vv.core.types import (
     CancelOrder,
+    Decision,
     HaltState,
     PlaceOrder,
     Snapshot,
@@ -135,11 +136,20 @@ def run_replay(
     features: Mapping[str, pd.DataFrame] | None = None,
     record_trace: bool = False,
     keep_fills: bool = True,
+    strategy: Callable[[Snapshot, Any], tuple[Decision, Any]] | None = None,
+    strategy_state: Any = None,
 ) -> ReplayResult:
     """Replay ``[start, end)`` at ``decision_minutes`` steps; see the module docstring.
 
     ``features`` may carry ``precompute_features`` output for the full history (it must have
     been computed with ``grid.sigma_horizon_minutes``); otherwise it is computed here.
+
+    ``strategy`` replaces the production ``decide(snapshot, grid, risk)``: it is called as
+    ``strategy(snapshot, state) -> (Decision, new_state)`` with ``state`` starting at
+    ``strategy_state`` (the strategy owns its params and risk; ``grid`` is then only used
+    for ``sigma_horizon_minutes``, i.e. the features). Under multiprocessing it must be
+    picklable (a module-level callable object). With ``strategy=None`` the behaviour is
+    unchanged.
     """
     t_wall = time.perf_counter()
     fees = fees or Fees()
@@ -243,6 +253,7 @@ def run_replay(
     daily_eq: list[float] = []
     last_day = None
     n_places = n_cancels = 0
+    n_snap_fills = 0  # exchange fills already handed to a snapshot
 
     for i, t in enumerate(times_py):
         ex.advance_to(t)
@@ -271,8 +282,16 @@ def run_replay(
         if trace is not None:
             trace.append((t, used))
 
-        snapshot = Snapshot(ts=t, markets=markets, bars={}, portfolio=pf, stale=(), features=feats)
-        decision = decide(snapshot, grid, risk)
+        new_fills = tuple(dict(f) for f in ex.fills[n_snap_fills:])
+        n_snap_fills = len(ex.fills)
+        snapshot = Snapshot(
+            ts=t, markets=markets, bars={}, portfolio=pf, stale=(), features=feats,
+            fills_since_last=new_fills,
+        )
+        if strategy is None:
+            decision = decide(snapshot, grid, risk)
+        else:
+            decision, strategy_state = strategy(snapshot, strategy_state)
 
         # Halt events (transitions only), then persist the halt and the equity peak.
         if decision.halt.active and not halt.active:

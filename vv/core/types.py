@@ -129,6 +129,9 @@ class Snapshot:
     portfolio: PortfolioState
     stale: tuple[str, ...] = ()
     features: dict[str, SymbolFeatures] = field(default_factory=dict)
+    # Exchange fills (``FakeExchange.fills`` dicts: symbol, side, price, qty, client_id, ...)
+    # since the previous snapshot. Stateful strategies (paired grid) use it; ``decide`` ignores it.
+    fills_since_last: tuple = ()
 
     @property
     def fresh(self) -> bool:
