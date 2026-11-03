@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 ANN = 365
+CASH_YIELD = 0.04  # idle-USDT benchmark, per year (compounded, 365-day years)
 _BAR = pd.Timedelta(minutes=1)
 
 
@@ -108,6 +109,97 @@ def net_capture_over_fees(gross_pnl: float, fees: float) -> float:
     return float(gross_pnl / fees)
 
 
+def cash_yield_return(index: pd.DatetimeIndex, rate: float = CASH_YIELD) -> float:
+    """Return of idle cash earning ``rate`` per year (compound) over the span of ``index``."""
+    days = (index[-1] - index[0]) / pd.Timedelta(days=1)
+    return float((1.0 + rate) ** (max(days, 0.0) / ANN) - 1.0)
+
+
+def cash_yield_curve(
+    times: pd.DatetimeIndex, start_cash: float, rate: float = CASH_YIELD
+) -> pd.Series:
+    """Equity of ``start_cash`` left in a ``rate``-per-year USDT yield, marked at ``times``."""
+    years = (times - times[0]) / pd.Timedelta(days=ANN)
+    return pd.Series(start_cash * (1.0 + rate) ** np.asarray(years, dtype=float), index=times,
+                     name="cash_yield")
+
+
+def daily_pnl(equity: pd.Series) -> pd.Series:
+    """P&L between consecutive equity points (USDT)."""
+    return equity.astype(float).diff().dropna()
+
+
+def top_n_day_pnl_share(pnl: pd.Series | np.ndarray, n: int = 10) -> float:
+    """Sum of the ``n`` best days' P&L over total P&L (can exceed 1 when other days lose).
+
+    NaN when there is no P&L series or the total is not positive (the share of a flat or
+    losing book is not meaningful).
+    """
+    p = np.asarray(pnl, dtype=float)
+    if p.size == 0:
+        return float("nan")
+    total = float(p.sum())
+    if not total > 0.0:
+        return float("nan")
+    top = np.sort(p)[::-1][: max(int(n), 0)]
+    return float(top.sum() / total)
+
+
+def exposure_audit(held: pd.Series, resting: pd.Series, equity: pd.Series) -> dict[str, float]:
+    """Time-weighted exposure from a fine-grained trace (same index for all three series).
+
+    ``held``: holdings at mark (USDT); ``resting``: notional of resting buys (USDT);
+    ``equity``: total equity (USDT). Each sample is held until the next one, so the last
+    sample carries no weight. Fractions are of *equity* (0..1, not percent).
+
+    * ``holdings_exposure``: mean of ``held / equity``;
+    * ``total_exposure``: mean of ``(held + resting) / equity`` (what the exposure cap bounds);
+    * ``avg_held_usdt`` / ``avg_deployed_usdt``: the same in USDT (deployed = held + resting);
+    * ``pnl``: last minus first equity;
+    * ``return_on_avg_held`` / ``return_on_avg_deployed``: ``pnl`` over those averages
+      (NaN when the average is zero).
+    """
+    nan = float("nan")
+    if len(equity) < 2:
+        return dict.fromkeys(
+            ("holdings_exposure", "total_exposure", "avg_held_usdt", "avg_deployed_usdt", "pnl",
+             "return_on_avg_held", "return_on_avg_deployed"), nan,
+        )
+    t = equity.index.asi8.astype(float)
+    w = np.diff(t)
+    w_sum = float(w.sum())
+    e = equity.to_numpy(dtype=float)[:-1]
+    h = held.to_numpy(dtype=float)[:-1]
+    r = resting.to_numpy(dtype=float)[:-1]
+    safe = np.where(e > 0, e, np.nan)
+    avg_h = float((h * w).sum() / w_sum)
+    avg_d = float(((h + r) * w).sum() / w_sum)
+    pnl = float(equity.iloc[-1] - equity.iloc[0])
+    return {
+        "holdings_exposure": float(np.nansum(h / safe * w) / w_sum),
+        "total_exposure": float(np.nansum((h + r) / safe * w) / w_sum),
+        "avg_held_usdt": avg_h,
+        "avg_deployed_usdt": avg_d,
+        "pnl": pnl,
+        "return_on_avg_held": pnl / avg_h if avg_h > 0 else nan,
+        "return_on_avg_deployed": pnl / avg_d if avg_d > 0 else nan,
+    }
+
+
+def deployed_from_decisions(decisions: pd.DataFrame) -> dict[str, float]:
+    """Capital tied up (holdings + resting buys, after each decision) from ``ReplayResult.decisions``.
+
+    ``avg_total_exposure``: mean of ``exposure_total_post`` (fraction of equity);
+    ``avg_deployed_usdt``: mean of ``exposure_total_post * equity``. The older ``avg_exposure``
+    counts holdings only (pre-decision), which is a different and much smaller number.
+    """
+    if len(decisions) == 0:
+        return {"avg_total_exposure": float("nan"), "avg_deployed_usdt": float("nan")}
+    post = decisions["exposure_total_post"].to_numpy(dtype=float)
+    eq = decisions["equity"].to_numpy(dtype=float)
+    return {"avg_total_exposure": float(post.mean()), "avg_deployed_usdt": float((post * eq).mean())}
+
+
 def summarize(
     equity: pd.Series,
     *,
@@ -115,8 +207,11 @@ def summarize(
     gross_pnl: float = 0.0,
     round_trips: int = 0,
     avg_exposure: float = float("nan"),
+    avg_total_exposure: float = float("nan"),
+    avg_deployed_usdt: float = float("nan"),
 ) -> dict[str, Any]:
     r = daily_returns(equity)
+    cash_ret = cash_yield_return(equity.index)
     return {
         "total_return": total_return(equity),
         "cagr": cagr(equity),
@@ -130,6 +225,14 @@ def summarize(
         "gross_pnl": float(gross_pnl),
         "net_capture_over_fees": net_capture_over_fees(gross_pnl, fees_paid),
         "avg_exposure": float(avg_exposure),
+        "cash_yield_return": cash_ret,
+        "excess_over_cash": total_return(equity) - cash_ret,
+        "avg_total_exposure": float(avg_total_exposure),
+        "avg_deployed_usdt": float(avg_deployed_usdt),
+        "return_on_avg_deployed": (
+            float(equity.iloc[-1] - equity.iloc[0]) / avg_deployed_usdt
+            if avg_deployed_usdt > 0 else float("nan")
+        ),
     }
 
 

@@ -27,3 +27,13 @@ See `docs/research/G1_DECISION.md`. These are **diagnostics, not trials**. They 
 
 ## Reply (≤120 words)
 status · test line · the four one-line conclusions
+
+## Result
+Status: done. Report: `docs/research/G1_DIAGNOSTICS.md` (numbers cached in `data/g1_diagnostics_raw.json`; `python -m research.g1_diagnostics --symbols ... --reuse-raw` re-renders).
+
+- `FakeExchange(min_pierce=0.0)`: default byte-identical, proven by a golden digest recorded from the pre-change code (`tests/sim/test_diagnostics.py`) plus the untouched fake-exchange/replay suites.
+- `vv/sim/metrics.py` (additive): `cash_yield_return`, `cash_yield_curve`, `daily_pnl`, `top_n_day_pnl_share`, `exposure_audit`, `deployed_from_decisions`; `summarize` gains `cash_yield_return`, `excess_over_cash`, `avg_total_exposure`, `avg_deployed_usdt`, `return_on_avg_deployed` (old fields unchanged).
+- Because `vv/sim/replay.py` is out of scope, `run_replay` gets `min_pierce` / the tracing exchange by swapping `vv.sim.replay.FakeExchange` inside `research.g1_diagnostics.pierce_exchange(...)`. A `min_pierce` argument on `run_replay` / `Fees` would be cleaner if the orchestrator wants it.
+- `record_trace=True` records only the feature-bar timestamps, not exposure; the audit rebuilds exposure from a per-minute exchange trace (`TracingExchange`) and cross-checks it against the fills.
+- Single-symbol windows that open before a listing (LINK 2019, DOGE 2019, SOL 2020) start one pre-roll hour after the first bar, since the exchange clock cannot start after `start`. The strategy is not warm that early, so nothing is lost.
+- Runs used `--processes 1` alongside the G1 v2 job.

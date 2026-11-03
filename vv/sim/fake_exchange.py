@@ -26,6 +26,10 @@ Matching rules
 * Intrabar path: O->L->H->C when ``close >= open`` (buys fill first, highest
   price first, then sells, lowest first), else O->H->L->C (sells first, then
   buys). Ties break by placement order.
+* ``min_pierce`` (default 0.0 = the rule above, byte-identical): a resting buy needs
+  ``low < price*(1 - min_pierce) - tick``, a sell ``high > price*(1 + min_pierce) + tick``,
+  i.e. the bar must trade through by a fraction of the price as well as the tick. A
+  diagnostic knob for fill-depth sensitivity; taker fills ignore it.
 * ``fill_haircut < 1``: each eligible maker fill happens with that probability
   (seeded RNG, one draw per eligible order per bar); otherwise it keeps resting.
 * Non-post-only orders are taker, IOC-limit semantics: they fill in full at the
@@ -168,6 +172,7 @@ class FakeExchange:
         taker_slippage_bps: float = 10,
         fill_haircut: float = 1.0,
         seed: int = 0,
+        min_pierce: float = 0.0,
     ) -> None:
         if not bars:
             raise ValueError("bars must contain at least one symbol")
@@ -175,6 +180,8 @@ class FakeExchange:
             raise ValueError("start_cash must be >= 0")
         if not 0.0 <= fill_haircut <= 1.0:
             raise ValueError("fill_haircut must be in [0, 1]")
+        if not 0.0 <= min_pierce < 1.0:
+            raise ValueError("min_pierce must be in [0, 1)")
         missing = [s for s in bars if s not in filters]
         if missing:
             raise ValueError(f"no filters for symbols: {missing}")
@@ -183,6 +190,7 @@ class FakeExchange:
         self.taker_fee = taker_fee
         self.taker_slippage = taker_slippage_bps / 10_000.0
         self.fill_haircut = fill_haircut
+        self.min_pierce = min_pierce
         self._rng = random.Random(seed)
         self._filters = {s: filters[s] for s in bars}
         self._base = {s: _split_symbol(s) for s in bars}
@@ -277,12 +285,15 @@ class FakeExchange:
             self._fill_taker(od, o, tick, close_ts)
 
         # 2) resting orders trade through along the intrabar path
+        mp = self.min_pierce
         buys = sorted(
-            (x for x in orders if x.post_only and x.side == "buy" and low < x.price - tick - eps),
+            (x for x in orders
+             if x.post_only and x.side == "buy" and low < x.price * (1 - mp) - tick - eps),
             key=lambda x: (-x.price, x.seq),
         )
         sells = sorted(
-            (x for x in orders if x.post_only and x.side == "sell" and h > x.price + tick + eps),
+            (x for x in orders
+             if x.post_only and x.side == "sell" and h > x.price * (1 + mp) + tick + eps),
             key=lambda x: (x.price, x.seq),
         )
         for od in (buys + sells) if c >= o else (sells + buys):
