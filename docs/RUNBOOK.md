@@ -19,6 +19,7 @@ Plain-language guide for running the daily bot on the VM. Read it end to end onc
 ## 3. `.env` (never commit it)
 Create `.env` in the checkout and run `chmod 600 .env`. Variables:
 - `VV_BINANCE_KEY`, `VV_BINANCE_SECRET`: the exchange key pair.
+- `VV_BINANCE_TEST_VENUE`: only for `--mode testnet`. Set it to `testnet` (the default) for keys made on testnet.binancefuture.com, or `demo` for keys made in Binance Demo Trading (demo-fapi.binance.com). A key only works on the venue it was created on.
 - `VV_TELEGRAM_TOKEN`, `VV_TELEGRAM_CHAT`: alert bot and chat.
 - `VV_HEARTBEAT_URL`: a dead-man's-switch URL, pinged after every run.
 - `VV_LIVE_CONFIRM=yes`: only for live. Leave it out otherwise. Without it, live mode refuses to run.
@@ -72,3 +73,24 @@ Both timers use `Persistent=true`, so a run missed during a reboot happens at th
 Scripts are in `deploy/drills/`. Each prints PASS, FAIL or SKIP.
 - Drills 1, 2 and 4 run in dry mode. They use the checkout's Python environment (`make bootstrap`), not the container, because the seed helper runs on the host.
 - Drills 3 and 5 are VM-only. Run them on the VM with `VV_DRILL_VM=1`, in testnet mode.
+
+
+## Creating a test API key
+
+Use one of the two options. Both use play money.
+
+**Option A: Futures testnet (testnet.binancefuture.com)**
+1. Open https://testnet.binancefuture.com and register or log in. This is a separate account from your real Binance login.
+2. On the trading page, scroll below the chart to the **API Key** tab. Your key and secret are shown there.
+3. Copy both straight into the VM's `.env`. The secret is shown only once.
+4. Leave `VV_BINANCE_TEST_VENUE` unset, or set it to `testnet`.
+
+**Option B: Binance Demo Trading (demo-fapi.binance.com)**
+1. Log in to binance.com and switch to **Demo Trading**.
+2. Open **API Management** inside Demo Trading and create a key. Choose system-generated (HMAC).
+3. Enable futures trading only. Leave withdrawals off.
+4. Copy the key and secret into `.env` and set `VV_BINANCE_TEST_VENUE=demo`.
+
+Binance changes these menus from time to time. If a button has moved, check https://developers.binance.com/docs/derivatives/usds-margined-futures/general-info.
+
+**Never paste keys into chats, tickets or git.** They belong only in `.env` (chmod 600) on the VM.

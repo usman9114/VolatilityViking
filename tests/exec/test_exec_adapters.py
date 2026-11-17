@@ -249,3 +249,19 @@ def test_client_repr_has_no_keys(monkeypatch):
     monkeypatch.setenv("VV_BINANCE_SECRET", "SECRET-zyxwvu987654")
     c = CcxtPerpClient("testnet")
     assert "KEY-" not in repr(c) and "SECRET-" not in repr(c)
+
+
+def test_test_venue_selects_endpoint(monkeypatch):
+    import pytest as _pytest
+
+    from vv.exec.binance_perp import CcxtPerpClient
+
+    monkeypatch.delenv("VV_BINANCE_KEY", raising=False)
+    monkeypatch.delenv("VV_BINANCE_SECRET", raising=False)
+    monkeypatch.setenv("VV_BINANCE_TEST_VENUE", "demo")
+    assert "demo-fapi.binance.com" in CcxtPerpClient("testnet").ex.urls["api"]["fapiPrivate"]
+    monkeypatch.setenv("VV_BINANCE_TEST_VENUE", "testnet")
+    assert "testnet.binancefuture.com" in CcxtPerpClient("testnet").ex.urls["api"]["fapiPrivate"]
+    monkeypatch.setenv("VV_BINANCE_TEST_VENUE", "bogus")
+    with _pytest.raises(ValueError):
+        CcxtPerpClient("testnet")
