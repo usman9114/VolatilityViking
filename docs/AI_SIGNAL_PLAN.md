@@ -1,85 +1,82 @@
 # Evidence-Weighted Signal Engine (EWSE): plan and testing plan
 
-*Draft v1, 2026-11-17. Goal: use AI to find and act on predictive signals for long/short (spot + USD-M perps), where every signal earns its weight through evidence, only strong signals trade, and the research loop never stalls.*
+*v2, 2026-11-17. Revised after review by Sam (operator) and Maya (quant). v1 is in git history. Goal: use AI to find predictive signals for long/short (spot + USD-M perps). Capital follows evidence, strong evidence gets more, and the loop never stalls.*
 
-## 1. Core idea
-Treat AI as a **hypothesis factory**, not an oracle. Cheap AI agents propose many candidate signals. A strict, automated evidence engine kills most of them. A Bayesian allocator gives money only to the few with strong, accumulating evidence, and takes it away again as evidence decays.
+## 0. What changed from v1, and why
+- **v1's hard gate couldn't decide.** It promoted only at P(SR>0) ≥ 0.95 on forward data. Maya's arithmetic: a genuine Sharpe-1.0 signal needs ~7–10 years of daily data to clear that. Sam's: a Sharpe-0.5 signal needs ~11 years. The 26-week cap would have retired every real signal. That's the "getting stuck" trap.
+- **v2 sizes by evidence, with no on/off gate.** Capital is proportional to the posterior (fractional Kelly on a shrunk estimate). The prior comes from pre-registered historical tests. Forward data **adds** to that evidence and watches for **decay**; it doesn't have to prove the edge from scratch.
 
+## 1. Core loop
 ```
- market week ──► post-mortem ──► AI hypothesis agents ──► auto pre-registration
-                                                              │
-        ┌──────────────── graveyard (never retest) ◄──fail───┤
-        ▼                                                     ▼
-  history-eligible? ──yes──► Tier-1 replay screen ──pass──► shadow book (forward, paper)
-        │ no (AI/LLM/news)                                    │ sequential evidence, daily
-        └──────────────────────────────────────────────────► │
-                                                              ▼
-                       Bayesian allocator (only P(SR>0) ≥ 0.95 trades) ──► vol-targeted long/short book
-                                                              │
-                              live P&L + decay monitor ───────┘ (demote on decay)
+hypothesis (AI-assisted, ≤10/yr) ─► pre-registration (hashed) ─► T1 historical walk-forward
+          ▲                                                           │ result = informative prior N(SR̂, se²),
+          │ graveyard (all trials count)                              │ shrunk by a hierarchical selection prior
+          │                                                           ▼
+   post-mortems ◄── live & shadow P&L ◄── allocator: weight ∝ posterior SR (¼-Kelly), factor budgets, caps
+                                              ▲                       │
+                                              └── decay monitor ◄─────┘ (CUSUM vs prior; cut on decay)
 ```
 
-## 2. What's new here (and why it fits the AI age)
-1. **AI as the researcher, not the predictor.** Agents read essays, papers, event post-mortems and market structure, then write *testable* hypotheses with an expected sign, horizon, data source and kill criterion. A pre-registration file is generated and hashed **before** any data is touched. One operator can run hundreds of honest experiments a year that used to need a quant team.
-2. **No LLM backtests (look-ahead by training).** An LLM asked to judge 2022 news already "knows" how 2022 ended, so any historical backtest of an LLM-derived signal is contaminated. Every AI/LLM/news signal is therefore validated **forward only**. Its outputs are stored in an append-only, timestamped store (model id, prompt hash, inputs, output) at the moment they are produced. This is the rule most "AI trading" claims break.
-3. **Evidence-weighted, abstaining predictions.**
-   - Each signal outputs a direction **and a calibrated confidence**.
-   - Conformal / calibrated thresholds mean a signal *abstains* unless its confidence clears a level that held up historically or in forward tests. Fewer trades, higher hit rate: "only a strong signal passes".
-   - Signal weight = posterior evidence, not backtest return: w_i ∝ E[SR_i | data], shrunk toward 0 by a sceptical prior (SR ~ N(0, 0.5²) annualised). It is non-zero **only if P(SR_i > 0) ≥ 0.95** with at least 60 effective independent observations.
-4. **Sequential testing, so we're never stuck.** Each shadow signal gets an always-valid confidence sequence (a mixture-martingale bound) on its Sharpe. Decisions happen as soon as the evidence allows, not at an arbitrary date:
-   - **Promote** when the lower bound > 0.
-   - **Retire for futility** when the upper bound < 0.3.
-   - Cap shadow time at 26 weeks.
+## 2. Evidence-proportional allocation (replaces the 0.95 gate)
+- **Posterior per signal.**
+  - Prior: hierarchical N(μ_H, τ²), estimated from **every** hypothesis we've tested, graveyard included. Until enough exist, use μ_H = 0, τ = 0.5.
+  - Then update with the T1 out-of-sample estimate (stress costs), then with forward daily returns.
+- **Weight:** w_i = ¼ × posterior-mean SR_i / σ_i. It's zero if P(SR_i > 0) < 0.80.
+- **Ramp cap** on capital at risk: 5% of target capital to start, scaled by the posterior precision gained since launch. No signal jumps to full size on history alone.
+- **Combination:** a new signal's evidence is its **incremental** alpha over the current book, i.e. its shadow P&L regressed on the book. Weights come from a shrunk covariance (Ledoit-Wolf) of shadow P&L. One risk budget applies per factor. Trend, positioning, funding, stablecoin and VIX all load on one "risk-on" factor, so they share a budget instead of stacking.
+- **Decay monitor:** a CUSUM of realised minus prior-expected P&L. A breach halves the weight; a second breach sets it to 0 and sends it for review.
+- **Worked example, G2 S1 (spot trend).** Stress OOS SR 0.77, se ≈ 0.73 over 2.8 years. With the sceptical prior, the posterior mean is about 0.25 and P(SR>0) about 0.73, so **no weight yet**. One more year forward at SR ~0.8 lifts P(SR>0) above 0.80 and earns a small weight. Evidence ramps capital; it never flips it on all at once.
 
-   Every cycle ends in a decision. Nothing waits forever, and failures go to the graveyard with their reason, so they're never re-tested.
-5. **Risk-first composition.** The combined book uses only volatility targeting, the risk-off dial (from the feature screen), caps, and gross ≤ 1×. Shorts are allowed on perps. Predictive signals tilt the book; they never lever it.
-
-## 3. Signal families (initial hypothesis queue)
-| Family | Example hypothesis | Validation path |
-|---|---|---|
-| Trend / time-series momentum | 20/60/120-day trend (G2) | History (Tier 1) |
-| Positioning / crowding | Crowded long (long/short ratio z > 1) plus a positive funding spike precedes higher crash risk | History (2022+) |
-| Liquidity / macro regime | Stablecoin supply contraction plus a rising dollar ⇒ risk-off | History |
-| Volatility events | Scheduled CPI/FOMC days ⇒ higher next-day vol, so cut size beforehand | History (calendar is point-in-time) |
-| Cross-sectional | Long the strongest / short the weakest coin on 30-day momentum | History |
-| **LLM event classifier** | Exchange hacks, delistings, enforcement or ETF-flow news classified daily ⇒ risk-off for N days | **Forward only** |
-| **LLM daily regime memo** | Structured risk-on/off probability from that day's news and data | **Forward only** |
-| ETF flows (needs a paid feed) | Multi-day outflow streak ⇒ negative next-week drift | History once the data is available |
-
-## 4. Testing plan
-| Tier | What | Pass rule | Applies to |
+## 3. Signal types are judged on what they're for
+| Type | Role | Judged by | Validation |
 |---|---|---|---|
-| T0 Unit / property | No look-ahead (truncation tests), leak canaries (a deliberately leaked feature must be caught), determinism, caps | All green in CI | Everything |
-| T1 Historical replay | Pre-registered walk-forward 2019/20→2026: costs ×2, BH-FDR across the cycle's tests, deflated Sharpe with the trial count | OOS Sharpe CI lower > 0 and survives FDR | Point-in-time-clean data only |
-| T2 Shadow / forward | Paper P&L from live data; sequential confidence sequence | Promote: lower bound > 0 (P(SR>0) ≥ 0.95). Retire: upper bound < 0.3 or 26 weeks | Everything (mandatory for AI/LLM) |
-| T3 Tiny live | 1–5% of target capital, real fills, kill switches | Live vs shadow tracking error within band for 4 weeks; no ops incidents | Promoted combos |
-| T4 Scale | 25% → 100% | Rolling evidence stays above threshold; decay monitor quiet | — |
+| Directional (trend, cross-sectional momentum) | Tilts long/short | Posterior SR, incremental | T1 prior + forward |
+| Risk-off / vol (dial, event calendar, vol forecast) | **Only reduces** exposure | Drawdown reduction, QLIKE of vol forecasts, utility in vol targeting. These have far more statistical power than SR | T1 + forward |
+| **AI/LLM signals** (news classifier, regime memo) | **Risk-off veto only. Can never add risk** | Drawdown utility, forward only | Forward only, with strict provenance (below) |
 
-Cross-cutting checks:
-- A **fill-realism check** (pierce sweep).
-- **Benchmark beats:** cash at 4%, buy-and-hold at the same exposure.
-- A **trial ledger** (every hypothesis ever tested counts toward deflation).
-- **Ops drills** before T3.
+## 4. AI and LLM rules (leak control)
+1. **Forward only.** No historical backtests of LLM-derived signals: the model's training already contains the outcomes.
+2. **One prompt hash = one signal.** Changing the prompt starts a new signal with a fresh clock. No tuning on forward results.
+3. **Timestamp provenance.** Store the article publish time, crawl time and revision. Use the crawl time.
+4. **Post-mortem hypotheses** (from AI agents that know 2022–26) are tested **only on data after the post-mortem date**, or run forward-only.
+5. **Append-only store:** model id, prompt hash, inputs, output and ingestion timestamp.
 
-## 5. Weekly loop (cadence, budgets, never stuck)
-1. **Mon: automated post-mortem** of the past week (as in `LAST_WEEK_*.md`): what moved, and what each live and shadow signal said beforehand.
-2. **Mon: hypothesis agents** (Sonnet, ≤ 5 new hypotheses a week, each ≤ 1 page) write pre-registrations. Haiku checks schema and data availability.
-3. **Tue–Wed: T1 screen** for history-eligible hypotheses (CPU budget ≤ 2 h). Failures → graveyard.
-4. **Daily: shadow book** updates and the evidence engine runs. Promotions and retirements are automatic, with a human sign-off for anything touching capital.
-5. **Fri: allocator re-weights** live signals; a weekly report goes to the team page.
-6. **Budgets:** ≤ ~500k tokens a week for agents; a fixed CPU budget; a quarterly review of the whole funnel (hit rate of hypotheses, cost per promoted signal).
+## 5. Testing plan
+| Tier | What | Rule |
+|---|---|---|
+| T0 Unit / property | No look-ahead, leak canaries, determinism, caps, perp accounting (funding, margin, liquidation) | CI green |
+| T1 Historical | Pre-registered walk-forward. Costs ×2. Trial ledger and deflation. Pierce sweep for fill realism | Produces the **prior**, not a pass/fail |
+| T2 Shadow (VM) | Daily forward paper book with real data; tracking error vs simulator | Validates plumbing and decay, not Sharpe |
+| T3 Tiny live | Ramp-capped capital and hard limits (below) | Live vs shadow tracking error within band; zero ops incidents for 4 weeks before any ramp-up |
+| Ops drills | Restart mid-position, halt persistence, key revocation, network cut, data gap | Must pass before T3 |
 
-## 6. Build order (work packages)
+**Hard limits in production:**
+- one-way position mode
+- **isolated margin per symbol**
+- gross ≤ 1×
+- **shorts capped at 0.5× equity in total**
+- reduce-only exits
+- a persisted halt that never auto-resumes
+- a no-withdrawal API key with an IP allowlist
+
+## 6. Minimum viable loop (build now)
 | WP | What | Model |
 |---|---|---|
-| E1 | Signal registry (YAML: id, hypothesis, sign, horizon, data, prereg hash, status, evidence) plus graveyard | Sonnet |
-| E2 | Point-in-time feature store (append-only, ingestion timestamps; LLM outputs with model id and prompt hash) | Sonnet |
-| E3 | Evidence engine: Bayesian shrinkage weights, always-valid confidence sequences, promote/retire rules | Sonnet |
-| E4 | Shadow book: daily forward P&L per signal and for the combined book (spot and perp, funding) reusing `portfolio_sim` | Sonnet |
-| E5 | Allocator: evidence weights → vol-targeted long/short targets with dial and caps | Sonnet |
-| E6 | Hypothesis-agent harness: prompt plus template that emits a pre-registration; Haiku schema check | Sonnet + Haiku |
-| E7 | Weekly loop runner plus report; scheduled routine | Haiku |
-| E8 | Perp/spot execution adapter (testnet first), state, alerts, Docker, for T2/T3 on the operator's VM | Sonnet + Haiku |
+| M1 | **Execution adapter** (USD-M perps + spot) via ccxt. One-way mode, isolated margin, reduce-only exits, clientOrderId, precision/min-notional, time sync, ADL rank logging, reconcile on restart. Tested on the futures testnet (reachable here) and a fake | Sonnet |
+| M2 | **Daily runner:** data collector with gap detection → G2 trend targets → evidence allocator → orders (dry-run / testnet / live modes). SQLite state, persisted halt, Telegram alerts, heartbeat | Sonnet |
+| M3 | **Evidence engine:** hierarchical prior, posterior, ¼-Kelly weights, factor budgets, CUSUM decay. Registry YAML plus trial ledger | Sonnet |
+| M4 | **Deploy:** Docker compose, systemd, runbook, ops-drill scripts for the operator's VM | Haiku |
 
-## 7. Honest expectations
-Most hypotheses will die, and that is the system working. A realistic success is **a few weak, independent signals** combining into a modest, steady Sharpe, with smaller drawdowns than holding. Not a crystal ball. The engine's real value is that it stops us fooling ourselves while letting AI do the research grind at scale.
+Deferred until something is ready to scale: AI hypothesis agents (≤10 hypotheses a year, quarterly), the full LLM feature store, the news veto.
+
+## 7. Weekly cadence (operator: ~1 hour a week)
+- **Mon:** an automated post-mortem plus the evidence report. Manual 15-minute review.
+- **Daily:** the runner (automatic).
+- **Quarterly:** 2–3 new pre-registered hypotheses through T1.
+- **Every cycle ends in a weight change or a documented "no change".** The loop always moves.
+
+## 8. Honest expectations
+- **No signal has proven edge yet.** G2 trend passed 3 of 5 gates and failed on statistical power and on 2022/drawdown. It therefore starts with **zero or tiny weight** and earns more only as forward evidence arrives.
+- **Even when a signal earns weight,** expect a modest Sharpe with smaller drawdowns than buy-and-hold, not a crystal ball.
+- **Real-money steps** (T3 and every ramp-up) need the owner's explicit approval.
+- **Futures need the owner's confirmation** that Binance USD-M futures are legal for them where the VM runs.
