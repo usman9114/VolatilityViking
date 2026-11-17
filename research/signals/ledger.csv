@@ -1,0 +1,25 @@
+id,date,family,outcome,sr,se
+G1v1-T01,2026-11-09,g1_grid,fail (G1 gate; in-sample trial of 10; selected T09 OOS CI lower bound -0.62),,
+G1v1-T02,2026-11-09,g1_grid,fail (G1 gate; in-sample trial of 10; selected T09 OOS CI lower bound -0.62),,
+G1v1-T03,2026-11-09,g1_grid,fail (G1 gate; in-sample trial of 10; selected T09 OOS CI lower bound -0.62),,
+G1v1-T04,2026-11-09,g1_grid,fail (G1 gate; in-sample trial of 10; selected T09 OOS CI lower bound -0.62),,
+G1v1-T05,2026-11-09,g1_grid,fail (G1 gate; in-sample trial of 10; selected T09 OOS CI lower bound -0.62),,
+G1v1-T06,2026-11-09,g1_grid,fail (G1 gate; in-sample trial of 10; selected T09 OOS CI lower bound -0.62),,
+G1v1-T07,2026-11-09,g1_grid,fail (G1 gate; in-sample trial of 10; selected T09 OOS CI lower bound -0.62),,
+G1v1-T08,2026-11-09,g1_grid,fail (G1 gate; in-sample trial of 10; selected T09 OOS CI lower bound -0.62),,
+G1v1-T09,2026-11-09,g1_grid,fail (G1 gate; in-sample trial of 10; selected T09 OOS CI lower bound -0.62),,
+G1v1-T10,2026-11-09,g1_grid,fail (G1 gate; in-sample trial of 10; selected T09 OOS CI lower bound -0.62),,
+G1v2-B1,2026-11-10,g1v2_B,fail (G1v2 gate: no variant deployable),,
+G1v2-B2,2026-11-10,g1v2_B,fail (G1v2 gate: no variant deployable),,
+G1v2-B3,2026-11-10,g1v2_B,fail (G1v2 gate: no variant deployable),,
+G1v2-C1,2026-11-10,g1v2_C,fail (G1v2 gate: no variant deployable),,
+G1v2-C2,2026-11-10,g1v2_C,fail (G1v2 gate: no variant deployable),,
+G1v2-C3,2026-11-10,g1v2_C,fail (G1v2 gate: no variant deployable),,
+CARRY-1,2026-11-12,carry,not pursued (funding carry study; gross funding thin after 2022),,
+FS-B,2026-11-15,feature_screen,contributes (derivatives; risk-input only),,
+FS-C,2026-11-15,feature_screen,does not contribute (macro FRED),,
+FS-D,2026-11-15,feature_screen,contributes (crypto-native; risk-input only),,
+G2-S1,2026-11-17,g2_trend,fail (gate G2; stress OOS SR 0.77),0.77,0.6765
+G2-S2,2026-11-17,g2_trend,fail (gate G2; stress OOS SR 0.72),0.72,0.6667
+G2-P1,2026-11-17,g2_trend,fail (gate G2; stress OOS SR 0.56),0.56,0.6390
+G2-P2,2026-11-17,g2_trend,fail (gate G2; stress OOS SR 0.44),0.44,0.6222

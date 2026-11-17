@@ -1,0 +1,66 @@
+# Signal registry. Seeded 2026-11-17 from docs/research/G2_RESULTS.md (stress OOS 2024-01-01..2026-10-31).
+signals:
+  - id: S1
+    family: trend_spot
+    role: directional
+    hypothesis: "spot trend, vol-targeted, long/flat"
+    sign: 1
+    horizon: 1d
+    data: spot
+    prereg_path: research/g2_preregistration.json
+    prereg_sha256: 03b11f242e99d4554bc7d7ec45a6d5c7f11386670f2f8a35592a4f0fe0536c0e
+    status: candidate
+    created: '2026-11-17'
+    t1:
+      sr_oos_stress: 0.77
+      se: 0.6765
+      years: 2.8329
+    notes: G2 gate FAIL as pre-registered (CI lower bound < 0); evidence prior only.
+  - id: S2
+    family: trend_spot
+    role: directional
+    hypothesis: "spot trend with risk-off dial"
+    sign: 1
+    horizon: 1d
+    data: spot
+    prereg_path: research/g2_preregistration.json
+    prereg_sha256: 03b11f242e99d4554bc7d7ec45a6d5c7f11386670f2f8a35592a4f0fe0536c0e
+    status: candidate
+    created: '2026-11-17'
+    t1:
+      sr_oos_stress: 0.72
+      se: 0.6667
+      years: 2.8329
+    notes: G2 gate FAIL as pre-registered (CI lower bound < 0); evidence prior only.
+  - id: P1
+    family: trend_perp
+    role: directional
+    hypothesis: "perp trend, vol-targeted, long/short"
+    sign: 1
+    horizon: 1d
+    data: perp
+    prereg_path: research/g2_preregistration.json
+    prereg_sha256: 03b11f242e99d4554bc7d7ec45a6d5c7f11386670f2f8a35592a4f0fe0536c0e
+    status: candidate
+    created: '2026-11-17'
+    t1:
+      sr_oos_stress: 0.56
+      se: 0.6390
+      years: 2.8329
+    notes: G2 gate FAIL as pre-registered (CI lower bound < 0); evidence prior only.
+  - id: P2
+    family: trend_perp
+    role: directional
+    hypothesis: "perp trend with risk-off dial"
+    sign: 1
+    horizon: 1d
+    data: perp
+    prereg_path: research/g2_preregistration.json
+    prereg_sha256: 03b11f242e99d4554bc7d7ec45a6d5c7f11386670f2f8a35592a4f0fe0536c0e
+    status: candidate
+    created: '2026-11-17'
+    t1:
+      sr_oos_stress: 0.44
+      se: 0.6222
+      years: 2.8329
+    notes: G2 gate FAIL as pre-registered (CI lower bound < 0); evidence prior only.
