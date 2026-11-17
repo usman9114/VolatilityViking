@@ -9,7 +9,7 @@ signals:
     data: spot
     prereg_path: research/g2_preregistration.json
     prereg_sha256: 03b11f242e99d4554bc7d7ec45a6d5c7f11386670f2f8a35592a4f0fe0536c0e
-    status: candidate
+    status: shadow
     created: '2026-11-17'
     t1:
       sr_oos_stress: 0.77
@@ -25,7 +25,7 @@ signals:
     data: spot
     prereg_path: research/g2_preregistration.json
     prereg_sha256: 03b11f242e99d4554bc7d7ec45a6d5c7f11386670f2f8a35592a4f0fe0536c0e
-    status: candidate
+    status: shadow
     created: '2026-11-17'
     t1:
       sr_oos_stress: 0.72
@@ -41,7 +41,7 @@ signals:
     data: perp
     prereg_path: research/g2_preregistration.json
     prereg_sha256: 03b11f242e99d4554bc7d7ec45a6d5c7f11386670f2f8a35592a4f0fe0536c0e
-    status: candidate
+    status: shadow
     created: '2026-11-17'
     t1:
       sr_oos_stress: 0.56
@@ -57,7 +57,7 @@ signals:
     data: perp
     prereg_path: research/g2_preregistration.json
     prereg_sha256: 03b11f242e99d4554bc7d7ec45a6d5c7f11386670f2f8a35592a4f0fe0536c0e
-    status: candidate
+    status: shadow
     created: '2026-11-17'
     t1:
       sr_oos_stress: 0.44

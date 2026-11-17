@@ -41,3 +41,53 @@ After the tests pass, run `--mode dry` once against real public data in this con
 
 ## Reply (≤120 words)
 status · test line · dry-run summary (evidence weights, targets, intended orders)
+
+## Result
+status: done. Tests: `tests/runner` 20 passed; ruff clean; `make test` 397 passed, 1 xfailed.
+
+Files: `vv/runner/{__init__,__main__,config,state,data,alerts,engine,core,report}.py`, `tests/runner/{__init__,conftest,test_runner}.py`, `config/runner.example.yaml`.
+
+Design decisions to check:
+- Only `live` signals of the configured venue enter the book; `shadow` signals get targets, shadow P&L and evidence but carry no capital. All four registry signals are `candidate`, so today the runner is a no-op (registry untouched).
+- Variant params (venue, shorts, dial) come from the signal's prereg JSON `variants[id]` (the registry schema has no such fields).
+- Gap checks: last bar must equal yesterday (UTC), age <= 26h, no holes in last 180 days. Exit codes: 0 ok, 1 error, 2 gap, 3 halted, 4 startup/reconcile halt, 5 live refused.
+- Dial inputs (fred, stablecoins, BTC metrics) come from `data/external`, which nothing refreshes; if older than 5 days the dial is skipped and an alert is raised. Funding archive ends 2026-10-31, so perp shadow funding is 0 and flagged (`funding_missing`).
+- Shadow P&L is forward-only (from the runner's stored targets), minus `shadow_cost_bps` on turnover. Spot testnet is refused (vv.exec has none).
+- Dry orders are sized from `dry_equity` (10000) vs. the `positions` table.
+
+Dry run (real public data, all four signals temporarily `shadow` via a scratchpad registry copy; the real registry, all `candidate`, gives "no signals", no orders):
+# Daily run 2026-11-17 (dry, venue spot)
+
+Status: **ok**
+
+## Evidence
+| signal | status | variant | post mean | post sd | P(SR>0) | fwd n | 1/4-Kelly | decay | final weight |
+|---|---|---|---|---|---|---|---|---|---|
+| S1 | shadow | spot | 0.272 | 0.402 | 0.751 | 0 | 0.000 | ok | 0.0000 |
+| S2 | shadow | spot/dial | 0.259 | 0.400 | 0.741 | 0 | 0.000 | ok | 0.0000 |
+| P1 | shadow | perp/short | 0.213 | 0.394 | 0.705 | 0 | 0.000 | ok | 0.0000 |
+| P2 | shadow | perp/short/dial | 0.173 | 0.390 | 0.671 | 0 | 0.000 | ok | 0.0000 |
+
+## Targets vs held
+| symbol | close | target weight | target qty | held qty |
+|---|---|---|---|---|
+| BTC/USDT | 64882.87 | 0.0000 | 0.000000 | 0.000000 |
+| ETH/USDT | 1820.67 | 0.0000 | 0.000000 | 0.000000 |
+| SOL/USDT | 71.58 | 0.0000 | 0.000000 | 0.000000 |
+| XRP/USDT | 0.9553 | 0.0000 | 0.000000 | 0.000000 |
+| DOGE/USDT | 0.05893 | 0.0000 | 0.000000 | 0.000000 |
+| LINK/USDT | 9.142 | 0.0000 | 0.000000 | 0.000000 |
+
+## Orders
+No orders.
+
+## Shadow P&L (daily, signal at weight 1)
+| signal | last date | pnl | days |
+|---|---|---|---|
+| S1 | - | no realised days yet | 0 |
+| S2 | - | no realised days yet | 0 |
+| P1 | - | no realised days yet | 0 |
+| P2 | - | no realised days yet | 0 |
+
+## Alerts
+None.

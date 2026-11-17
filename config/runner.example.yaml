@@ -1,0 +1,25 @@
+# Daily runner config. Copy to config/runner.yaml (gitignored by convention) and adjust.
+# python -m vv.runner --config config/runner.yaml --mode dry
+symbols: [BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, LINKUSDT]
+venue: spot                       # spot | perp (only signals whose variant venue matches enter the book)
+registry_path: research/signals/registry.yaml
+ledger_path: research/signals/ledger.csv
+repo_root: .                      # prereg paths in the registry resolve against this
+caps:
+  gross: 1.0
+  short: 0.5                      # total short notional / equity
+  per_coin: 0.25
+ramp_base: 0.05                   # capital-at-risk floor multiplier (evidence.weights.ramp_cap)
+factor_budget: {risk_on: 1.0}     # all trend variants are factor risk_on
+state_db: state/runner.db
+data_dir: data                    # daily bars kept in <data_dir>/runner/daily.parquet
+external_dir: data/external       # dial features + funding archive (read only)
+reports_dir: reports
+mode: dry                         # dry | testnet | live (live also needs env VV_LIVE_CONFIRM=yes)
+dry_equity: 10000.0               # reference equity for dry-run order sizing
+history_days: 420                 # initial backfill depth
+external_max_age_days: 5          # staler dial inputs -> no dial penalty + alert
+shadow_cost_bps: 10.0             # per unit turnover, charged in shadow P&L
+min_order_notional: 10.0          # dry-run orders below this are skipped
+# Env (all optional): VV_TELEGRAM_TOKEN, VV_TELEGRAM_CHAT, VV_HEARTBEAT_URL,
+# VV_LIVE_CONFIRM (live only). Exchange keys are read only by vv.exec, from the environment.
