@@ -40,3 +40,10 @@ Tests and ruff are green. When the WP-R1 files exist, run the real screen and wr
 
 ## Reply (≤150 words)
 status · test line · verdict per group · the 3 strongest OOS features with their IC
+
+## Result
+Status: done. 19 new tests (51 in tests/research) green, ruff clean. Real screen run on WP-R1 data; report in `docs/research/FEATURE_SCREEN.md`.
+Extra outputs (not in the brief's file list): `docs/research/feature_screen_{all_tests,incremental,event_study}.csv`, needed for "report every test".
+Choices where prereg was silent: F&G and stablecoins lagged +1 day; WALCL converted $m to $bn; logistic uses fixed C=1; vol_7d only in univariate; Nov funding left NaN (not ffilled); zero-OI rows treated as NaN; no sklearn/statsmodels (numpy/scipy implementations).
+B common sample starts 2022-05-27, not 2021-12 (some metrics columns start later or have gaps).
+Literal verdict: B and D "contribute", C does not. Weak: criterion (b) was met on vol_7d while (a) was met on crash/return targets; rv_30d (price-only) is the strongest OOS vol predictor.
