@@ -39,3 +39,9 @@ Turn **target positions** (signed coin quantities per symbol) into safe exchange
 
 ## Reply (≤120 words)
 status · test line · public testnet smoke result · interface notes for the M2 runner
+
+## Result
+- Built `vv/exec/{common,binance_perp,binance_spot,fake,reconcile}.py`, `tests/exec/test_exec_adapters.py` (20 tests, no hypothesis installed so property tests use seeded random loops).
+- `rebalance(...)` takes an extra required keyword `decision_ts: int` (epoch s) for deterministic clientOrderIds. It raises `TradingHalted` / `StartupCheckFailed` instead of returning. Only symbols in `targets` are managed. Call `adapter.start(symbols)` first.
+- Flips split into a reduce-only leg then an entry leg; entry skipped if the reduce leg did not fill.
+- Testnet public smoke OK: load_markets (743) + BTC/USDT:USDT filters and order-book quote via `CcxtPerpClient('testnet')`. Needs the proxy: ccxt ignores HTTPS_PROXY, so the client passes `https_proxy` and `verify=SSL_CERT_FILE` (run with SSL_CERT_FILE=/root/.ccr/ca-bundle.crt). fetch_ticker has no bid/ask on testnet, so quotes use the order book. Private smoke pending testnet keys. Ccxt clients untested for private calls (fake only).
