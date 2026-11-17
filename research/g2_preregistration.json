@@ -1,0 +1,60 @@
+{
+  "_note": "G2 pre-registered 2026-11-17 before any result. Trend-following with volatility targeting, spot (long/flat) and USD-M perpetuals (long/short), with and without the risk-off dial from the feature screen. 4 configurations, no tuning. Do not edit after results exist.",
+  "version": 1,
+  "universe": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "LINKUSDT"],
+  "data": {
+    "spot": "data/futures/{SYM}_spot_1h.parquet (close) for signals and spot execution",
+    "perp": "data/futures/{SYM}_perp_1h.parquet (OHLC) for perp execution and marks",
+    "funding": "data/futures/{SYM}_funding.parquet (rate per funding print)",
+    "dial_features": "built with research/feature_screen.py feature construction and its lagging rules"
+  },
+  "period": {"start": "2020-01-01", "end": "2026-10-31", "eligibility": "a coin trades once it has 120 days of spot history and (perp variants) a listed perp"},
+  "signal": {
+    "lookbacks_days": [20, 60, 120],
+    "score": "mean over lookbacks of sign(close_t / close_{t-L} - 1); values in {-1, -1/3, 1/3, 1}",
+    "timing": "decided on daily closes up to 00:00 UTC; executed at the next hourly bar (perp: next 1h open; spot: next 1h close as proxy) plus slippage"
+  },
+  "sizing": {
+    "vol_forecast": "EWMA std of daily log returns, halflife 30 days, annualised x sqrt(365)",
+    "raw_weight": "score x (0.12 / sqrt(N_eligible)) / vol_forecast",
+    "per_coin_cap": 0.25,
+    "gross_cap": 1.0,
+    "spot_variants": "negative weights set to 0 (long/flat)",
+    "rebalance_band": "trade a coin only if |target - current| >= max(0.02, 0.25 x |target|) of equity"
+  },
+  "risk_dial": {
+    "formula": "m = 1 - 0.25*[z(stablecoin_supply_chg_30d) < -1] - 0.25*[z(vix_level) > 1] - 0.25*[z(global_ls_ratio, basket mean) > 1]; missing term = 0 penalty; floor 0.25",
+    "z": "trailing 365-day z-score, using the feature screen's lagging rules",
+    "applied_to": "all target weights (scales gross exposure)"
+  },
+  "costs": {
+    "spot": {"taker": 0.001},
+    "perp": {"taker": 0.0005, "maintenance_margin": 0.005, "margin_mode": "cross"},
+    "slippage_bps": 5,
+    "funding": "perp positions settle funding at each print: cash -= signed_notional x rate (longs pay positive rates, shorts receive)",
+    "stress": "fees x2 and slippage x2"
+  },
+  "variants": {
+    "S1": {"venue": "spot", "allow_short": false, "risk_dial": false},
+    "S2": {"venue": "spot", "allow_short": false, "risk_dial": true},
+    "P1": {"venue": "perp", "allow_short": true, "risk_dial": false},
+    "P2": {"venue": "perp", "allow_short": true, "risk_dial": true}
+  },
+  "run": "one continuous run per variant from start to end, starting cash 10,000 USDT; splits are reporting windows only (no reset)",
+  "splits": [
+    {"name": "2020", "role": "in_sample"}, {"name": "2021", "role": "in_sample"},
+    {"name": "2022", "role": "in_sample"}, {"name": "2023", "role": "in_sample"},
+    {"name": "2024", "role": "out_of_sample"}, {"name": "2025-2026", "role": "out_of_sample"}
+  ],
+  "benchmarks": ["equal-weight buy-and-hold of eligible coins", "cash at 4% per year", "G1 v2 selected variants (for reference only)"],
+  "gate_g2_per_variant": {
+    "oos_sharpe_ci_lower_gt": 0.0,
+    "oos_sharpe_ci": "stationary block bootstrap of OOS daily returns, mean block 10 days, 2000 reps, under fees x2 and slippage x2",
+    "oos_beats_cash": "annualised OOS return > 4%",
+    "positive_splits": "net return > 0 in a majority of the 6 splits, and 2022 among them",
+    "max_drawdown_full_run": 0.20,
+    "no_liquidations": true,
+    "note": "Max drawdown limit is 20% over the continuous 6.8-year run (G1 used 15% per one-year split). Stated before results."
+  },
+  "after_pass": "A passing variant goes to paper trading (Binance testnet or live paper) as the true holdout before any capital. 2024+ has been seen by the team in other contexts; disclosed."
+}
