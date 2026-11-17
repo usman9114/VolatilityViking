@@ -1,24 +1,13 @@
-
-# Exclude git
-.git/
-.gitignore
-
-# Exclude python/env artifacts
-venv/
+# Build context exclusions: keep data, secrets, caches and dead code out of the image.
+data/
 .venv/
-__pycache__/
-*.pyc
-.env
-
-# Exclude data/outputs (except structure if needed, but we copy selectively)
-data/processed/
-data/temp/
-mlruns/
-models/*.pth
-bot.log
-*.png
-*.html
-
-# CRITICAL: Exclude heavy build artifacts to prevent context bloat
-*.tar
-eth_bot_image.tar
+legacy/
+.git/
+graphify-out/
+reports/
+**/*.db
+**/.env*
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.ruff_cache/

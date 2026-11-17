@@ -1,0 +1,12 @@
+[Unit]
+Description=VolatilityViking external data refresh (incremental)
+Wants=docker.service
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Adjust to the directory holding this checkout on the VM.
+WorkingDirectory=/opt/volatilityviking
+ExecStart=/usr/bin/docker compose run --rm -T refresh
+TimeoutStartSec=2h

@@ -1,0 +1,13 @@
+[Unit]
+Description=VolatilityViking daily runner (dry, testnet or live per config/runner.yaml)
+Wants=docker.service
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Adjust to the directory holding this checkout on the VM.
+WorkingDirectory=/opt/volatilityviking
+# Exit codes: 0 ok, 1 error, 2 data gap, 3 halted, 4 reconcile halt, 5 live refused. Non-zero means read the alert.
+ExecStart=/usr/bin/docker compose run --rm -T runner
+TimeoutStartSec=2h

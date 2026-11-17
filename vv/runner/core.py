@@ -120,7 +120,7 @@ def run(cfg: RunnerConfig, mode: str | None = None, *, now: pd.Timestamp | None 
             st.save_targets(bar_s, sid, {k: float(v) for k, v in t.items()})
 
         # 3. evidence ---------------------------------------------------
-        funding = E.funding_from_archive(cfg.external_dir)
+        funding = E.funding_with_live(cfg.external_dir)
         notes = []
         for s in active:
             notes += E.update_shadow(st, s.id, variants[s.id], close, funding, cfg.shadow_cost_bps)

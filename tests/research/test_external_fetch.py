@@ -119,3 +119,29 @@ def test_fear_greed_and_stablecoin_parsers():
     )
     out = ef.parse_stablecoins(stable)
     assert out.loc["2024-01-02", "stablecoin_supply_usd"] == 1100.0
+
+
+# ---- --incremental (WP-M4): only fetch Binance days after each file's last date ----
+
+def test_incremental_start_is_day_after_last_row(tmp_path):
+    old = ef._finalise(pd.DataFrame({"x": [1.0, 2.0]}, index=pd.DatetimeIndex(["2026-11-01", "2026-11-05"])))
+    old.to_parquet(tmp_path / "binance_metrics_BTCUSDT.parquet")
+    assert ef.incremental_start("binance_metrics_BTCUSDT.parquet", tmp_path, pd.Timestamp("2021-12-01")) == pd.Timestamp("2026-11-06")
+    # missing file: fall back to the default full-history start
+    assert ef.incremental_start("binance_premium_BTCUSDT.parquet", tmp_path, pd.Timestamp("2020-01-01")) == pd.Timestamp("2020-01-01")
+
+
+def test_incremental_premium_urls_are_daily_only():
+    urls = ef._premium_urls("BTCUSDT", start=pd.Timestamp("2026-11-14"), end=pd.Timestamp("2026-11-16"))
+    assert len(urls) == 3
+    assert all("/daily/premiumIndexKlines/BTCUSDT/1h/" in u for u in urls)
+    assert urls[-1].endswith("BTCUSDT-1h-2026-11-16.zip")
+
+
+def test_incremental_merge_new_rows_win_and_history_kept(tmp_path):
+    old = ef._finalise(pd.DataFrame({"perp_premium": [0.1, 0.2]}, index=pd.DatetimeIndex(["2026-11-14", "2026-11-15"])))
+    new = ef._finalise(pd.DataFrame({"perp_premium": [0.25, 0.3]}, index=pd.DatetimeIndex(["2026-11-15", "2026-11-16"])))
+    out = ef.merge_existing(new, old)
+    assert list(out.index.strftime("%Y-%m-%d")) == ["2026-11-14", "2026-11-15", "2026-11-16"]
+    assert out.loc["2026-11-15", "perp_premium"] == 0.25
+    assert out.index.name == "date"

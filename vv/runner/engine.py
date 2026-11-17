@@ -166,6 +166,32 @@ def funding_from_archive(external_dir: str | Path) -> FundingLoader:
     return load
 
 
+def funding_with_live(external_dir: str | Path,
+                      fetch: Callable[[str, int], pd.Series] | None = None,
+                      lookback_days: int = 60) -> FundingLoader:
+    """Archive first; if the archive lacks the day, fall back to the live USD-M funding API
+    (reachable from the operator's VM). Daily rate = sum of that UTC day's funding prints."""
+    archive = funding_from_archive(external_dir)
+    if fetch is None:
+        from vv.runner.data import fetch_funding as fetch
+    live: dict[str, pd.Series | None] = {}
+
+    def load(symbol: str, bar_date: pd.Timestamp) -> float | None:
+        v = archive(symbol, bar_date)
+        if v is not None:
+            return v
+        if symbol not in live:
+            since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=lookback_days)
+            s = fetch(symbol, int(since.timestamp() * 1000))
+            live[symbol] = s.groupby(s.index.normalize()).sum() if len(s) else None
+        s = live[symbol]
+        if s is None or bar_date not in s.index:
+            return None
+        return float(s.loc[bar_date])
+
+    return load
+
+
 # ---------------------------------------------------------------- evidence
 def compute_evidence(reg_signals: list[Signal], state: State, cfg: RunnerConfig,
                      ledger_path: str | Path, *, default_vol: float = 0.12) -> list[EvidenceRow]:

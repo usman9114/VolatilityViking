@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily runner at 00:05 UTC
+
+[Timer]
+OnCalendar=*-*-* 00:05:00 UTC
+Persistent=true
+Unit=vv-runner.service
+
+[Install]
+WantedBy=timers.target

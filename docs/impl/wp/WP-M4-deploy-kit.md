@@ -56,3 +56,23 @@ Drills 1–2 and 4 must work in dry mode here. Drills 3 and 5 just need to be wr
 
 ## Reply (≤120 words)
 status · test line · docker build result · drill results
+
+## Result
+Status: done, with the gaps below. Nothing committed.
+
+Files: `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `deploy/systemd/*` (4 units), `deploy/drills/*` (5 scripts + `lib.sh`, `seed.py`), `docs/RUNBOOK.md`, `vv/runner/data.py` (`fetch_funding` only), `tests/runner/test_funding_fetch.py`, `research/external_fetch.py` (`--incremental`), `tests/research/test_external_fetch.py` (3 tests), `requirements-live.in` and `requirements-live.txt` (pyyaml, see 2).
+
+Tests: `make test` = 403 passed, 1 xfailed. `ruff check` clean on the changed Python files.
+
+Docker: not built. The Docker daemon is not running here and hadolint is not installed. The Dockerfile was checked by reading only. The compose file parses as YAML.
+
+Drills (dry, here): 1 PASS (kill lands mid-run in a check), 2 PASS (exit 3, no orders), 4 PASS (exit 2, no orders). 3 and 5 are VM-only and print SKIP here.
+
+Open questions and gaps (decisions for the owner):
+1. pyyaml was missing from `requirements-live.txt`, but `vv/runner/config.py` and `vv/evidence/registry.py` import it. I added the 6.0.3 block with hashes copied from `requirements-dev.txt`, by hand. Regenerate the lock with uv when convenient.
+2. `scipy` is not in the live lock. `vv/runner/engine.py` `build_dial` imports `research.feature_screen`, which needs scipy. Any active `risk_dial` signal will fail in the image. Add scipy to the lock or disable dial variants.
+3. `fetch_funding` is written and tested but not wired. The wiring point is `vv/runner/core.py` (funding loader, about line 123) and `vv/runner/engine.py`, both outside this brief's touch list.
+4. The brief asks for tests inside the container. The image has no `tests/` and no pytest, so the runbook says to run `make test` on a full checkout.
+5. The drills' seed helper runs on the host, so drills 1, 2 and 4 need the dev venv (`make bootstrap`), not the container.
+6. `--incremental` keeps `METRIC_END = 2026-11-15` for the full mode. Incremental runs extend to yesterday UTC. FRED, Fear & Greed and stablecoins are re-fetched in full each time.
+7. The stage 3 tracking-error band is not defined in `AI_SIGNAL_PLAN.md` §5. The runbook leaves it to the owner.

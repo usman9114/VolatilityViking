@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily data refresh at 23:40 UTC
+
+[Timer]
+OnCalendar=*-*-* 23:40:00 UTC
+Persistent=true
+Unit=vv-refresh.service
+
+[Install]
+WantedBy=timers.target

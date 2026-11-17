@@ -1,0 +1,39 @@
+# VolatilityViking operator stack. Start: docker compose build && docker compose run --rm runner
+# Host paths are relative to this directory. See docs/RUNBOOK.md.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-hardening: &hardening
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  restart: "no"
+
+services:
+  runner:
+    build: .
+    image: volatilityviking:latest
+    <<: *hardening
+    logging: *logging
+    env_file: .env
+    volumes:
+      - ./state:/app/state
+      - ./data:/app/data
+      - ./reports:/app/reports
+      - ./config:/app/config:ro
+
+  refresh:
+    build: .
+    image: volatilityviking:latest
+    <<: *hardening
+    logging: *logging
+    entrypoint: ["python", "-m", "research.external_fetch"]
+    command: ["--incremental"]
+    volumes:
+      - ./data:/app/data

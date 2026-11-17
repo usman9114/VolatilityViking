@@ -34,6 +34,37 @@ def fetch_daily(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataF
     return df[["close", "volume"]].astype(float)
 
 
+FUNDING_API = "https://fapi.binance.com/fapi/v1/fundingRate"
+
+
+def fetch_funding(symbol: str, since_ms: int) -> pd.Series:
+    """USD-M perp funding rates from startTime=since_ms, indexed by funding time (UTC).
+
+    Any error (network, HTTP, malformed payload) returns an empty Series; the caller
+    treats missing funding as a flagged gap rather than a crash."""
+    empty = pd.Series([], index=pd.DatetimeIndex([], tz="UTC"), dtype="float64", name="funding_rate")
+    try:
+        rows, t = [], int(since_ms)
+        while True:
+            url = f"{FUNDING_API}?symbol={symbol}&startTime={t}&limit=1000"
+            with urllib.request.urlopen(url, timeout=30) as r:
+                batch = json.load(r)
+            if not batch:
+                break
+            rows += [(int(b["fundingTime"]), float(b["fundingRate"])) for b in batch]
+            if len(batch) < 1000:
+                break
+            t = int(batch[-1]["fundingTime"]) + 1
+            time.sleep(0.1)
+    except Exception:  # noqa: BLE001 - any failure means "funding unavailable"
+        return empty
+    if not rows:
+        return empty
+    ts = pd.to_datetime([r[0] for r in rows], unit="ms", utc=True)
+    s = pd.Series([r[1] for r in rows], index=pd.DatetimeIndex(ts, name="fundingTime"), name="funding_rate")
+    return s[~s.index.duplicated(keep="last")].sort_index()
+
+
 def expected_last_bar(now: pd.Timestamp) -> pd.Timestamp:
     """The most recent fully closed daily bar (UTC midnight of yesterday)."""
     return now.tz_convert("UTC").normalize() - pd.Timedelta(days=1)

@@ -9,6 +9,11 @@ parsed with pandas, and deleted. 404s are skipped and recorded.
 
 Usage:
     .venv/bin/python -m research.external_fetch
+    .venv/bin/python -m research.external_fetch --incremental
+
+--incremental fetches Binance daily zips only for days after each existing file's
+last date (up to yesterday UTC) and merges them in. The all-history series (FRED,
+Fear & Greed, stablecoins) are re-fetched in full, as before; funding is local.
 """
 from __future__ import annotations
 
@@ -208,8 +213,9 @@ def _metrics_url(sym: str, day: pd.Timestamp) -> str:
     return f"{BINANCE_BASE}/daily/metrics/{sym}/{sym}-metrics-{day:%Y-%m-%d}.zip"
 
 
-def _fetch_metrics(sym: str, raw_dir: Path, ledger: Ledger) -> pd.DataFrame | None:
-    days = pd.date_range(METRIC_START, METRIC_END, freq="D")
+def _fetch_metrics(sym: str, raw_dir: Path, ledger: Ledger,
+                   start: str = METRIC_START, end: str = METRIC_END) -> pd.DataFrame | None:
+    days = pd.date_range(start, end, freq="D")
     fn = functools.partial(lambda d: _load_zip(_metrics_url(sym, d), raw_dir, read_metrics_zip))
     frames = _run_many(fn, list(days), f"binance_metrics_{sym}.parquet", ledger)
     if not frames:
@@ -234,7 +240,11 @@ def premium_daily_mean(raw: pd.DataFrame) -> pd.DataFrame:
     return _finalise(daily.to_frame("perp_premium"))
 
 
-def _premium_urls(sym: str) -> list[str]:
+def _premium_urls(sym: str, start: pd.Timestamp | None = None, end: pd.Timestamp | None = None) -> list[str]:
+    """Full history (monthly + daily) by default; with start/end, daily zips only."""
+    if start is not None and end is not None:
+        days = pd.date_range(start, end, freq="D")
+        return [f"{BINANCE_BASE}/daily/premiumIndexKlines/{sym}/1h/{sym}-1h-{d:%Y-%m-%d}.zip" for d in days]
     months = pd.period_range(PREMIUM_MONTHS[0], PREMIUM_MONTHS[1], freq="M")
     monthly = [
         f"{BINANCE_BASE}/monthly/premiumIndexKlines/{sym}/1h/{sym}-1h-{m.strftime('%Y-%m')}.zip"
@@ -247,9 +257,10 @@ def _premium_urls(sym: str) -> list[str]:
     return monthly + daily
 
 
-def _fetch_premium(sym: str, raw_dir: Path, ledger: Ledger) -> pd.DataFrame | None:
+def _fetch_premium(sym: str, raw_dir: Path, ledger: Ledger, urls: list[str] | None = None) -> pd.DataFrame | None:
     fn = functools.partial(lambda url: _load_zip(url, raw_dir, read_premium_zip))
-    frames = _run_many(fn, _premium_urls(sym), f"binance_premium_{sym}.parquet", ledger)
+    frames = _run_many(fn, urls if urls is not None else _premium_urls(sym),
+                       f"binance_premium_{sym}.parquet", ledger)
     if not frames:
         return None
     return premium_daily_mean(pd.concat(frames, ignore_index=True))
@@ -273,11 +284,32 @@ def _fetch_funding(sym: str) -> pd.DataFrame:
     return funding_daily_sum(pd.read_parquet(path))
 
 
+# ---------------------------------------------------------------- incremental
+
+def incremental_start(name: str, out_dir: Path, default_start: pd.Timestamp) -> pd.Timestamp:
+    """Day after the file's last date, or default_start when the file does not exist yet."""
+    path = out_dir / name
+    if not path.exists():
+        return pd.Timestamp(default_start)
+    last = pd.read_parquet(path).index.max()
+    return pd.Timestamp(last).normalize() + pd.Timedelta(days=1)
+
+
+def merge_existing(new: pd.DataFrame, old: pd.DataFrame) -> pd.DataFrame:
+    """Old history plus new rows; for a day present in both, the new row wins."""
+    return _finalise(pd.concat([old, new]))
+
+
 # ---------------------------------------------------------------- orchestration
 
-def build(raw_root: Path = RAW_DIR) -> tuple[dict[str, pd.DataFrame], Ledger]:
+def build(raw_root: Path = RAW_DIR, out_dir: Path = OUT_DIR, incremental: bool = False,
+          today: pd.Timestamp | None = None) -> tuple[dict[str, pd.DataFrame], Ledger]:
     ledger = Ledger()
     results: dict[str, pd.DataFrame] = {}
+    yesterday = None
+    if incremental:
+        now = pd.Timestamp.now(tz="UTC") if today is None else pd.Timestamp(today)
+        yesterday = now.tz_localize(None).normalize() - pd.Timedelta(days=1)
 
     def guard(name: str, fn: Callable[[], pd.DataFrame | None]) -> None:
         try:
@@ -297,14 +329,37 @@ def build(raw_root: Path = RAW_DIR) -> tuple[dict[str, pd.DataFrame], Ledger]:
         guard("fear_greed.parquet", lambda: parse_fear_greed(_get(FNG_URL)))
         guard("stablecoins.parquet", lambda: parse_stablecoins(_get(STABLECOIN_URL)))
         for sym in METRIC_SYMBOLS:
-            guard(f"binance_metrics_{sym}.parquet", lambda s=sym: _fetch_metrics(s, run_dir, ledger))
+            name = f"binance_metrics_{sym}.parquet"
+            if yesterday is None:
+                guard(name, lambda s=sym: _fetch_metrics(s, run_dir, ledger))
+                continue
+            start = incremental_start(name, out_dir, pd.Timestamp(METRIC_START))
+            guard(name, lambda s=sym, st=start: _merged(
+                name, out_dir, lambda: _fetch_metrics(s, run_dir, ledger, st.strftime("%Y-%m-%d"),
+                                                      yesterday.strftime("%Y-%m-%d"))))
         for sym in METRIC_SYMBOLS:
-            guard(f"binance_premium_{sym}.parquet", lambda s=sym: _fetch_premium(s, run_dir, ledger))
+            name = f"binance_premium_{sym}.parquet"
+            if yesterday is None:
+                guard(name, lambda s=sym: _fetch_premium(s, run_dir, ledger))
+                continue
+            start = incremental_start(name, out_dir, pd.Timestamp(PREMIUM_DAILY[0]))
+            urls = _premium_urls(sym, start, yesterday) if start <= yesterday else []
+            guard(name, lambda s=sym, u=urls: _merged(
+                name, out_dir, lambda: _fetch_premium(s, run_dir, ledger, u)))
         for sym in FUNDING_SYMBOLS:
             guard(f"funding_{sym}.parquet", lambda s=sym: _fetch_funding(s))
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
     return results, ledger
+
+
+def _merged(name: str, out_dir: Path, fetch: Callable[[], pd.DataFrame | None]) -> pd.DataFrame | None:
+    """Incremental: new rows merged onto the existing file. Nothing new keeps the file as it is."""
+    new = fetch()
+    path = out_dir / name
+    if new is None or new.empty:
+        return pd.read_parquet(path) if path.exists() else None
+    return merge_existing(new, pd.read_parquet(path)) if path.exists() else new
 
 
 def write(results: dict[str, pd.DataFrame], out_dir: Path = OUT_DIR) -> None:
@@ -328,9 +383,11 @@ def summary_table(results: dict[str, pd.DataFrame]) -> str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default=str(OUT_DIR))
+    ap.add_argument("--incremental", action="store_true",
+                    help="fetch only Binance days after each file's last date")
     args = ap.parse_args(argv)
 
-    results, ledger = build()
+    results, ledger = build(out_dir=Path(args.out), incremental=args.incremental)
     write(results, Path(args.out))
     print(summary_table(results))
     if ledger.missing:

@@ -47,7 +47,7 @@ hypothesis (AI-assisted, ≤10/yr) ─► pre-registration (hashed) ─► T1 hi
 | T0 Unit / property | No look-ahead, leak canaries, determinism, caps, perp accounting (funding, margin, liquidation) | CI green |
 | T1 Historical | Pre-registered walk-forward. Costs ×2. Trial ledger and deflation. Pierce sweep for fill realism | Produces the **prior**, not a pass/fail |
 | T2 Shadow (VM) | Daily forward paper book with real data; tracking error vs simulator | Validates plumbing and decay, not Sharpe |
-| T3 Tiny live | Ramp-capped capital and hard limits (below) | Live vs shadow tracking error within band; zero ops incidents for 4 weeks before any ramp-up |
+| T3 Tiny live | Ramp-capped capital and hard limits (below) | **Tracking band:** live minus shadow daily P&L has a mean absolute value ≤ 10 bps of equity, and the cumulative 4-week gap is ≤ 1% of equity. Zero ops incidents for 4 weeks before any ramp-up. Breaching the band halts the ramp-up and triggers a fill/cost review |
 | Ops drills | Restart mid-position, halt persistence, key revocation, network cut, data gap | Must pass before T3 |
 
 **Hard limits in production:**
