@@ -43,7 +43,7 @@ def main(argv=None) -> int:
     if not (os.environ.get("VV_BINANCE_KEY") and os.environ.get("VV_BINANCE_SECRET")):
         print("FAIL: no key/secret in env (VV_BINANCE_KEY/VV_BINANCE_SECRET or binance/bs_key)")
         return 2
-    venue = os.environ.get("VV_BINANCE_TEST_VENUE", "testnet")
+    venue = os.environ.get("VV_BINANCE_TEST_VENUE", "demo")
     print(f"venue={venue} (key present, secret present; values not shown)")
 
     from vv.exec.binance_perp import CcxtPerpClient

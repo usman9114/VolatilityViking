@@ -53,10 +53,10 @@ class CcxtPerpClient:
                 cfg["verify"] = os.environ.get("SSL_CERT_FILE") or True
             exchange = ccxt.binanceusdm(cfg)
             if mode == "testnet":
-                # VV_BINANCE_TEST_VENUE: "testnet" (testnet.binancefuture.com, default) or
-                # "demo" (Binance Demo Trading, demo-fapi.binance.com). Keys only work on the
+                # VV_BINANCE_TEST_VENUE: "demo" (default; Binance Demo Trading, demo-fapi.binance.com) or
+                # "testnet" (legacy testnet.binancefuture.com). Keys only work on the
                 # venue they were created on.
-                venue = os.environ.get("VV_BINANCE_TEST_VENUE", "testnet").strip().lower()
+                venue = os.environ.get("VV_BINANCE_TEST_VENUE", "demo").strip().lower()
                 if venue == "demo":
                     exchange.enable_demo_trading(True)
                 elif venue == "testnet":

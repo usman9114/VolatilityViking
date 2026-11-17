@@ -21,6 +21,7 @@ WORKDIR /app
 COPY vv/ ./vv/
 COPY research/ ./research/
 COPY config/runner.example.yaml ./config/runner.example.yaml
+COPY deploy/testnet_smoke.py ./deploy/testnet_smoke.py
 RUN mkdir -p /app/state /app/reports /app/data /app/config \
  && chown vv:vv /app/state /app/reports /app/data
 USER vv
