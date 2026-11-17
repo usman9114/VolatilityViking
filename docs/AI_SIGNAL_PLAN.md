@@ -79,4 +79,4 @@ Deferred until something is ready to scale: AI hypothesis agents (≤10 hypothes
 - **No signal has proven edge yet.** G2 trend passed 3 of 5 gates and failed on statistical power and on 2022/drawdown. It therefore starts with **zero or tiny weight** and earns more only as forward evidence arrives.
 - **Even when a signal earns weight,** expect a modest Sharpe with smaller drawdowns than buy-and-hold, not a crystal ball.
 - **Real-money steps** (T3 and every ramp-up) need the owner's explicit approval.
-- **Futures need the owner's confirmation** that Binance USD-M futures are legal for them where the VM runs.
+- **Futures:** the owner confirmed on 2026-11-17 that Binance USD-M futures are legal for them where the VM runs. API keys (testnet first) live only in the VM's `.env`, never in this repo or the cloud session.
