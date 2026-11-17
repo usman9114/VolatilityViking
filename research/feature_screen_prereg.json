@@ -1,0 +1,32 @@
+{
+  "_note": "Pre-registered 2026-11-17 before any feature result was computed. Exploratory screen: does external data add predictive power over price-only baselines? Do not edit after results exist.",
+  "version": 1,
+  "universe": {"single": "BTCUSDT", "basket": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "LINKUSDT"]},
+  "frequency": "daily, UTC close",
+  "targets": {
+    "ret_1d": "next-day log return",
+    "ret_7d": "next-7-day log return",
+    "crash_7d": "1 if the minimum close over the next 7 days is <= -10% vs today's close",
+    "vol_7d": "realised volatility of daily returns over the next 7 days"
+  },
+  "features": {
+    "A_baseline_price": ["ret_1d_past", "ret_7d_past", "ret_30d_past", "dist_sma200", "rv_7d", "rv_30d", "volume_z_30d"],
+    "B_derivatives_binance": ["funding_1d", "funding_7d", "oi_chg_1d", "oi_chg_7d", "oi_value_z_90d", "toptrader_ls_ratio", "global_ls_ratio", "taker_buysell_ratio", "perp_premium"],
+    "C_macro_fred": ["usd_broad_chg_5d", "us10y_chg_5d", "vix_level", "vix_chg_5d", "nasdaq_ret_5d", "fed_liquidity_chg_4w"],
+    "D_crypto_native": ["stablecoin_supply_chg_7d", "stablecoin_supply_chg_30d", "fear_greed", "fear_greed_chg_7d"]
+  },
+  "lagging": "Every feature uses only data published before the target window opens. FRED series are lagged 1 extra business day; weekly series (WALCL, WTREGEN) are lagged to their release day. Rolling z-scores use trailing windows only.",
+  "periods": {
+    "in_sample": ["2019-01-01", "2023-12-31"],
+    "out_of_sample": ["2024-01-01", "2026-11-15"],
+    "note": "Derivative metrics only start 2021-12; their in-sample period is shorter. The OOS period has been seen by the team in other contexts; disclosed."
+  },
+  "tests": {
+    "univariate": "Spearman rank IC of each feature vs each target, IS and OOS separately; 7d targets use HAC (Newey-West, 7 lags) t-stats.",
+    "incremental": "Walk-forward monthly refit: ridge regression (ret targets) and logistic regression (crash_7d) on baseline A, then A plus each external group (B, C, D) and all. Report OOS R^2 and OOS AUC/Brier vs A alone.",
+    "multiple_testing": "Benjamini-Hochberg FDR 10% across all feature x target univariate OOS tests. Report every test.",
+    "event_study": "Feature z-scores in the 7 days before the 8 largest 7-day drawdowns of BTC since 2019 (including 2026-11-09..15) vs all other days."
+  },
+  "decision_rule": "An external group 'contributes' only if (a) it improves OOS AUC for crash_7d by >= 0.03 or OOS R^2 for a return target by >= 0.5 percentage points over baseline A, and (b) at least one of its features survives BH-FDR OOS with the same sign as in-sample.",
+  "not_available": {"etf_flows": "farside.co.uk returns 403 to automated clients", "onchain_exchange_flows": "paid providers only (Glassnode/CryptoQuant)", "news_sentiment": "no free archived source with point-in-time timestamps"}
+}
